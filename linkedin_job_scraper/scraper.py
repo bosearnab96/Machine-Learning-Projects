@@ -18,6 +18,7 @@ from linkedin_api import Linkedin
 from config import (
     HIRING_KEYWORDS,
     LINKEDIN_EMAIL,
+    LINKEDIN_LI_AT,
     LINKEDIN_PASSWORD,
     MAX_POSTS_PER_RUN,
     SEARCH_QUERY,
@@ -58,9 +59,18 @@ def _is_hiring_post(text: str) -> bool:
 # ── LinkedIn client ───────────────────────────────────────────────────────────
 
 def _build_client() -> Linkedin:
-    """Authenticate and return a LinkedIn API client."""
-    logger.info("Authenticating with LinkedIn as %s …", LINKEDIN_EMAIL)
-    client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+    """
+    Authenticate and return a LinkedIn API client.
+    Cookie-based auth (LINKEDIN_LI_AT) is tried first — it bypasses
+    CAPTCHA/challenge blocks that occur when logging in from a new IP.
+    Falls back to username/password if the cookie is not set.
+    """
+    if LINKEDIN_LI_AT:
+        logger.info("Authenticating via li_at session cookie …")
+        client = Linkedin("", "", cookies={"li_at": LINKEDIN_LI_AT})
+    else:
+        logger.info("Authenticating with LinkedIn as %s …", LINKEDIN_EMAIL)
+        client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
     logger.info("Authenticated successfully.")
     return client
 

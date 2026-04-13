@@ -37,6 +37,7 @@ jobs:
       - name: Run scraper and send digest
         working-directory: linkedin_job_scraper
         env:
+          LINKEDIN_LI_AT:    ${{ secrets.LINKEDIN_LI_AT }}
           LINKEDIN_EMAIL:    ${{ secrets.LINKEDIN_EMAIL }}
           LINKEDIN_PASSWORD: ${{ secrets.LINKEDIN_PASSWORD }}
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}

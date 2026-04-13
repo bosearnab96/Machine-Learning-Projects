@@ -9,8 +9,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── LinkedIn credentials ──────────────────────────────────────────────────────
-LINKEDIN_EMAIL    = os.environ["LINKEDIN_EMAIL"]
-LINKEDIN_PASSWORD = os.environ["LINKEDIN_PASSWORD"]
+# Preferred: cookie-based auth (avoids CAPTCHA/challenge blocks on new IPs).
+# Set LINKEDIN_LI_AT to your li_at cookie value from your browser session.
+# Fallback: username + password (may trigger CHALLENGE on fresh IPs).
+LINKEDIN_LI_AT    = os.environ.get("LINKEDIN_LI_AT", "")
+LINKEDIN_EMAIL    = os.environ.get("LINKEDIN_EMAIL", "")
+LINKEDIN_PASSWORD = os.environ.get("LINKEDIN_PASSWORD", "")
 
 # ── Keywords used to detect hiring posts ─────────────────────────────────────
 # Extend this list freely — matching is case-insensitive.
