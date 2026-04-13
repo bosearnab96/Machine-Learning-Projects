@@ -1,8 +1,7 @@
-# Browser automation
-playwright==1.44.0
-playwright-stealth==1.0.6
+# LinkedIn post discovery via DuckDuckGo search (no auth, no IP blocks)
+duckduckgo-search==6.2.4
 
-# Scheduler
+# Daily scheduler
 APScheduler==3.10.4
 
 # Environment variable loader

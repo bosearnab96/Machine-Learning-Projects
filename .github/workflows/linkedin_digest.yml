@@ -2,7 +2,7 @@ name: LinkedIn Hiring Digest
 
 on:
   schedule:
-    - cron: "30 2 * * *"
+    - cron: "30 2 * * *"   # 08:00 AM IST daily
   workflow_dispatch:
 
 jobs:
@@ -20,20 +20,8 @@ jobs:
           cache: pip
           cache-dependency-path: linkedin_job_scraper/requirements.txt
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: pip install -r linkedin_job_scraper/requirements.txt
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libpango-1.0-0 libcairo2 libasound2t64 libgbm1 \
-            xvfb x11-utils
-
-      - name: Install Playwright browsers
-        run: python -m playwright install chromium
 
       - name: Restore seen-posts database
         uses: actions/cache@v4
@@ -46,22 +34,16 @@ jobs:
       - name: Run scraper and send digest
         working-directory: linkedin_job_scraper
         env:
-          LINKEDIN_COOKIES:    ${{ secrets.LINKEDIN_COOKIES }}
-          LINKEDIN_LI_AT:      ${{ secrets.LINKEDIN_LI_AT }}
-          LINKEDIN_JSESSIONID: ${{ secrets.LINKEDIN_JSESSIONID }}
-          GMAIL_SENDER:        ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:      ${{ secrets.GMAIL_PASSWORD }}
-          ALERT_RECIPIENT:     ${{ secrets.ALERT_RECIPIENT }}
-          DB_PATH:             seen_posts.db
-        run: xvfb-run -a --server-args="-screen 0 1280x800x24" python scheduler.py --now
+          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+          ALERT_RECIPIENT: ${{ secrets.ALERT_RECIPIENT }}
+          DB_PATH:         seen_posts.db
+        run: python scheduler.py --now
 
-      - name: Upload debug artifacts
+      - name: Upload debug log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-debug
-          path: |
-            linkedin_job_scraper/scraper.log
-            linkedin_job_scraper/raw_feed_dump.json
-            linkedin_job_scraper/feed_screenshot.png
+          name: scraper-log
+          path: linkedin_job_scraper/scraper.log
           retention-days: 3
