@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from requests.cookies import RequestsCookieJar
+
 from linkedin_api import Linkedin
 
 from config import (
@@ -62,10 +64,12 @@ def _is_hiring_post(text: str) -> bool:
 def _build_client() -> Linkedin:
     if LINKEDIN_LI_AT:
         logger.info("Authenticating via li_at + JSESSIONID cookies …")
-        return Linkedin("", "", cookies={
-            "li_at": LINKEDIN_LI_AT,
-            "JSESSIONID": LINKEDIN_JSESSIONID,
-        })
+        # Must use RequestsCookieJar — plain dict causes 'extract_cookies'
+        # AttributeError when requests processes response headers.
+        jar = RequestsCookieJar()
+        jar.set("li_at",      LINKEDIN_LI_AT,      domain=".linkedin.com", path="/")
+        jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
+        return Linkedin("", "", cookies=jar)
     logger.info("Authenticating as %s …", LINKEDIN_EMAIL)
     return Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
 
