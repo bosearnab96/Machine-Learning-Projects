@@ -62,4 +62,5 @@ jobs:
           path: |
             linkedin_job_scraper/scraper.log
             linkedin_job_scraper/raw_feed_dump.json
+            linkedin_job_scraper/feed_screenshot.png
           retention-days: 3

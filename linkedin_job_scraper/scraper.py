@@ -225,20 +225,26 @@ async def _fetch_with_browser() -> list[dict]:
 
         page = await ctx.new_page()
 
-        # Intercept voyager API JSON responses
+        # Log ALL JSON responses so we can see what LinkedIn actually calls
+        all_urls_seen: list[str] = []
+
         async def on_response(resp: Response) -> None:
             try:
-                if ("voyager/api" in resp.url and resp.status == 200
-                        and "json" in resp.headers.get("content-type", "")):
+                url   = resp.url
+                ct    = resp.headers.get("content-type", "")
+                status = resp.status
+                if status == 200 and "json" in ct:
+                    short = url.split("?")[0]
+                    all_urls_seen.append(short)
                     body = await resp.json()
-                    elems = body.get("elements", [])
-                    if elems:
-                        captured.extend(elems)
-                        if len(raw_samples) < 3:
-                            raw_samples.extend(elems[:2])
-                        logger.info("Intercepted %d elements from …/%s",
-                                    len(elems),
-                                    resp.url.split("voyager/api/")[-1].split("?")[0])
+                    if isinstance(body, dict):
+                        elems = body.get("elements", [])
+                        if elems:
+                            captured.extend(elems)
+                            if len(raw_samples) < 3:
+                                raw_samples.extend(elems[:2])
+                            logger.info("Captured %d elements from %s",
+                                        len(elems), short[-80:])
             except Exception:
                 pass
 
@@ -247,28 +253,76 @@ async def _fetch_with_browser() -> list[dict]:
         logger.info("Navigating to linkedin.com/feed …")
         await page.goto("https://www.linkedin.com/feed/",
                         wait_until="domcontentloaded", timeout=60_000)
-        await asyncio.sleep(5)
+        await asyncio.sleep(8)   # give SPA time to fire API calls
 
         final_url = page.url
         logger.info("Final URL: %s", final_url)
 
+        # Screenshot for debugging (uploaded as artifact)
+        try:
+            await page.screenshot(path="feed_screenshot.png", full_page=False)
+            logger.info("Screenshot saved.")
+        except Exception:
+            pass
+
         if "login" in final_url or "checkpoint" in final_url or "authwall" in final_url:
-            logger.error(
-                "Redirected to %s — cookies are invalid/expired. "
-                "Re-copy li_at from browser DevTools and update the secret.",
-                final_url,
-            )
+            logger.error("Redirected to %s — cookies invalid/expired.", final_url)
             await browser.close()
             return []
 
-        # Scroll to trigger more feed API calls
+        # Log what JSON URLs were seen
+        logger.info("JSON URLs seen so far (%d): %s",
+                    len(all_urls_seen), all_urls_seen[:20])
+
+        # Also try DOM extraction as fallback
+        try:
+            dom_posts = await page.evaluate("""() => {
+                const out = [];
+                // Try multiple selectors LinkedIn has used over the years
+                const containers = document.querySelectorAll(
+                    '[data-urn*="activity"], .feed-shared-update-v2, [data-id*="urn:li"]'
+                );
+                containers.forEach(c => {
+                    const textEl = c.querySelector(
+                        '.update-components-text span, .feed-shared-update-v2__description, ' +
+                        '.break-words span[dir], .attributed-text-segment-list__content'
+                    );
+                    const authorEl = c.querySelector(
+                        '.update-components-actor__name span, .feed-shared-actor__name span'
+                    );
+                    const text   = textEl   ? textEl.innerText.trim()   : '';
+                    const author = authorEl ? authorEl.innerText.trim() : 'Unknown';
+                    const urn    = c.getAttribute('data-urn') || c.getAttribute('data-id') || '';
+                    if (text.length > 40) out.push({text, author, urn});
+                });
+                return out;
+            }""")
+            logger.info("DOM extraction found %d post candidates", len(dom_posts))
+            for dp in dom_posts:
+                keywords = _extract_keywords(dp["text"])
+                if keywords:
+                    urn = dp["urn"]
+                    import hashlib
+                    pid = urn.split(":")[-1] if urn else hashlib.md5(dp["text"][:200].encode()).hexdigest()
+                    captured.append({
+                        "__dom__": True,
+                        "entityUrn": urn,
+                        "commentary": {"text": {"text": dp["text"]}},
+                        "actor": {"name": {"text": dp["author"]}},
+                        "createdAt": int(datetime.now(tz=timezone.utc).timestamp() * 1000),
+                    })
+        except Exception:
+            logger.warning("DOM extraction failed:\n%s", traceback.format_exc())
+
+        # Scroll to load more
         for i in range(5):
             await page.evaluate("window.scrollBy(0, 2500)")
             await asyncio.sleep(3)
-            logger.info("Scroll %d/5 — captured %d elements so far", i + 1, len(captured))
+            logger.info("Scroll %d/5 — captured %d so far", i + 1, len(captured))
             if len(captured) >= MAX_FEED_POSTS:
                 break
 
+        logger.info("All JSON URLs seen: %s", all_urls_seen)
         await browser.close()
 
     # Save raw samples for artifact inspection
