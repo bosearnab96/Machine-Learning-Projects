@@ -18,6 +18,7 @@ from linkedin_api import Linkedin
 from config import (
     HIRING_KEYWORDS,
     LINKEDIN_EMAIL,
+    LINKEDIN_JSESSIONID,
     LINKEDIN_LI_AT,
     LINKEDIN_PASSWORD,
     MAX_POSTS_PER_RUN,
@@ -66,8 +67,11 @@ def _build_client() -> Linkedin:
     Falls back to username/password if the cookie is not set.
     """
     if LINKEDIN_LI_AT:
-        logger.info("Authenticating via li_at session cookie …")
-        client = Linkedin("", "", cookies={"li_at": LINKEDIN_LI_AT})
+        logger.info("Authenticating via li_at + JSESSIONID session cookies …")
+        client = Linkedin("", "", cookies={
+            "li_at": LINKEDIN_LI_AT,
+            "JSESSIONID": LINKEDIN_JSESSIONID,
+        })
     else:
         logger.info("Authenticating with LinkedIn as %s …", LINKEDIN_EMAIL)
         client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
