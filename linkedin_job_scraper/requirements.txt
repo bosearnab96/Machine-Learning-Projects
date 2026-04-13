@@ -1,0 +1,8 @@
+# LinkedIn unofficial API (voyager/mobile API wrapper)
+linkedin-api==2.1.1
+
+# Scheduler
+APScheduler==3.10.4
+
+# Environment variable loader
+python-dotenv==1.0.1
