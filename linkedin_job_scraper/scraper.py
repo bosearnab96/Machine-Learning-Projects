@@ -1,7 +1,16 @@
 """
-scraper.py — Fetches LinkedIn posts and filters for hiring signals.
+scraper.py — Fetches LinkedIn hiring posts via a headless Chromium browser.
+
+Why Playwright instead of linkedin-api / raw requests:
+  LinkedIn's voyager API actively redirects direct HTTP requests from
+  datacenter IPs (e.g. GitHub Actions) to the login page regardless
+  of cookies.  A real browser (Chromium) carries the correct TLS
+  fingerprint and browser headers that LinkedIn accepts.  We load the
+  user's session cookies into the browser, navigate to the feed, and
+  intercept the voyager API JSON responses the browser receives.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -11,24 +20,17 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from requests.cookies import RequestsCookieJar
-from linkedin_api import Linkedin
+from playwright.async_api import async_playwright, Response
 
 from config import (
     HIRING_KEYWORDS,
     LINKEDIN_COOKIES,
-    LINKEDIN_EMAIL,
-    LINKEDIN_JSESSIONID,
     LINKEDIN_LI_AT,
-    LINKEDIN_PASSWORD,
     LOOKBACK_HOURS,
     MAX_FEED_POSTS,
-    MAX_POSTS_PER_PROFILE,
 )
 
 logger = logging.getLogger(__name__)
-
-# Raw dump file — uploaded as GitHub Actions artifact for debugging
 RAW_DUMP = Path("raw_feed_dump.json")
 
 
@@ -42,7 +44,7 @@ class HiringPost:
     text:       str
     post_url:   str
     posted_at:  datetime
-    source:     str = ""
+    source:     str = "feed"
     matched_keywords: list[str] = field(default_factory=list)
 
     def short_preview(self, max_chars: int = 280) -> str:
@@ -56,96 +58,64 @@ def _extract_keywords(text: str) -> list[str]:
     lower = text.lower()
     return [kw for kw in HIRING_KEYWORDS if kw.lower() in lower]
 
-def _is_hiring_post(text: str) -> bool:
-    return bool(_extract_keywords(text))
 
+# ── Cookie helpers ────────────────────────────────────────────────────────────
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _parse_cookie_string(cookie_str: str) -> RequestsCookieJar:
+def _build_playwright_cookies() -> list[dict]:
     """
-    Parse a browser document.cookie string into a RequestsCookieJar.
-    Sets each cookie once on .linkedin.com only — no duplicates.
-    NOTE: document.cookie omits HttpOnly cookies (e.g. li_at).
-          Inject li_at separately from LINKEDIN_LI_AT secret.
+    Build a list of Playwright-format cookie dicts from the secrets.
+    document.cookie misses HttpOnly cookies; li_at is injected separately.
     """
-    jar = RequestsCookieJar()
-    seen = set()
-    for part in cookie_str.split(";"):
+    cookies: list[dict] = []
+    seen: set[str] = set()
+
+    for part in (LINKEDIN_COOKIES or "").split(";"):
         part = part.strip()
         if "=" not in part:
             continue
         name, _, value = part.partition("=")
-        name  = name.strip()
+        name = name.strip()
         value = value.strip()
         if name in seen:
-            continue          # skip duplicates from split
+            continue
         seen.add(name)
-        jar.set(name, value, domain=".linkedin.com", path="/")
-    return jar
+        cookies.append({"name": name, "value": value,
+                        "domain": ".linkedin.com", "path": "/"})
 
-
-def _build_client() -> Linkedin:
-    if LINKEDIN_COOKIES:
-        logger.info("Authenticating via full browser cookie string + li_at …")
-        jar = _parse_cookie_string(LINKEDIN_COOKIES)
-
-        # li_at is HttpOnly — invisible to document.cookie — inject it manually
-        if LINKEDIN_LI_AT:
-            jar.set("li_at", LINKEDIN_LI_AT, domain=".linkedin.com", path="/")
-            logger.info("Injected li_at from LINKEDIN_LI_AT secret.")
-        else:
-            logger.warning("LINKEDIN_LI_AT secret not set — session may be rejected.")
-
-        # Override JSESSIONID with the known-good value if provided
-        if LINKEDIN_JSESSIONID:
-            jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
-
-        logger.info("Cookie names in jar: %s", sorted({c.name for c in jar}))
-        client = Linkedin("", "", cookies=jar)
-
+    # li_at is HttpOnly → not in document.cookie → inject from secret
+    li_at_cookie = {"name": "li_at", "value": LINKEDIN_LI_AT,
+                    "domain": ".linkedin.com", "path": "/",
+                    "httpOnly": True, "secure": True}
+    if "li_at" in seen:
+        # replace with secret value (more reliable)
+        cookies = [c if c["name"] != "li_at" else li_at_cookie for c in cookies]
     elif LINKEDIN_LI_AT:
-        logger.info("Authenticating via li_at + JSESSIONID cookies …")
-        jar = RequestsCookieJar()
-        jar.set("li_at",      LINKEDIN_LI_AT,      domain=".linkedin.com", path="/")
-        jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
-        client = Linkedin("", "", cookies=jar)
+        cookies.append(li_at_cookie)
 
-    else:
-        logger.info("Authenticating as %s …", LINKEDIN_EMAIL)
-        client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
-
-    logger.info("Auth complete.")
-    return client
+    return cookies
 
 
-# ── Recursive text walker ─────────────────────────────────────────────────────
+# ── Text / field extraction ───────────────────────────────────────────────────
 
-def _walk_text(obj, depth=0) -> str:
-    """
-    Recursively walk any dict/list structure and return the longest
-    string found under a key named 'text'. This is resilient to
-    LinkedIn silently restructuring their API response.
-    """
+def _walk_text(obj, depth: int = 0) -> str:
+    """Recursively find the longest string stored under a 'text' key."""
     if depth > 8:
         return ""
     if isinstance(obj, str):
         return obj
     if isinstance(obj, list):
-        candidates = [_walk_text(x, depth+1) for x in obj]
-        return max(candidates, key=len) if candidates else ""
+        parts = [_walk_text(x, depth + 1) for x in obj]
+        return max(parts, key=len) if parts else ""
     if isinstance(obj, dict):
-        # direct hit
         if "text" in obj and isinstance(obj["text"], str):
             return obj["text"]
-        # recurse into all values; prefer "commentary" and "description" keys first
-        priority = ["commentary", "description", "content", "text"]
-        seen = set()
+        priority = ["commentary", "description", "content"]
         results = []
+        seen_keys: set[str] = set()
         for k in priority + [k for k in obj if k not in priority]:
-            if k in obj and k not in seen:
-                seen.add(k)
-                t = _walk_text(obj[k], depth+1)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                t = _walk_text(obj[k], depth + 1)
                 if t:
                     results.append(t)
         return max(results, key=len) if results else ""
@@ -153,7 +123,6 @@ def _walk_text(obj, depth=0) -> str:
 
 
 def _extract_text(post: dict) -> str:
-    # Try the known fast path first
     commentary = post.get("commentary") or {}
     if isinstance(commentary, dict):
         inner = commentary.get("text") or {}
@@ -163,15 +132,13 @@ def _extract_text(post: dict) -> str:
                 return t
         elif isinstance(inner, str) and inner:
             return inner
-
-    # Fall back to recursive walker across the whole post
     return _walk_text(post)
 
 
 def _extract_author(post: dict) -> tuple[str, str]:
     actor = post.get("actor") or {}
     name_node = actor.get("name") or {}
-    name_text = name_node.get("text", "") if isinstance(name_node, dict) else str(name_node)
+    name_text = name_node.get("text", "") if isinstance(name_node, dict) else ""
     attrs = name_node.get("attributes", []) if isinstance(name_node, dict) else []
     pub_id = ""
     if attrs:
@@ -184,11 +151,8 @@ def _extract_author(post: dict) -> tuple[str, str]:
 
 
 def _extract_post_id(post: dict) -> str:
-    urn = (
-        post.get("dashEntityUrn")
-        or post.get("entityUrn")
-        or (post.get("updateMetadata") or {}).get("urn", "")
-    )
+    urn = (post.get("dashEntityUrn") or post.get("entityUrn")
+           or (post.get("updateMetadata") or {}).get("urn", ""))
     return urn.split(":")[-1] if urn else ""
 
 
@@ -201,7 +165,7 @@ def _extract_timestamp(post: dict) -> datetime:
 
 # ── Parser ────────────────────────────────────────────────────────────────────
 
-def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
+def _parse(post: dict) -> Optional[HiringPost]:
     try:
         text = _extract_text(post)
         if not text:
@@ -211,25 +175,16 @@ def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
             return None
         post_id = _extract_post_id(post)
         if not post_id:
-            # Still include it but use a hash of the text
             import hashlib
             post_id = hashlib.md5(text[:200].encode()).hexdigest()
-
         author, author_url = _extract_author(post)
         posted_at = _extract_timestamp(post)
         entity_urn = post.get("dashEntityUrn") or post.get("entityUrn", "")
-        post_url = (
-            f"https://www.linkedin.com/feed/update/{entity_urn}/"
-            if entity_urn else ""
-        )
+        post_url = (f"https://www.linkedin.com/feed/update/{entity_urn}/"
+                    if entity_urn else "")
         return HiringPost(
-            post_id=post_id,
-            author=author,
-            author_url=author_url,
-            text=text,
-            post_url=post_url,
-            posted_at=posted_at,
-            source=source,
+            post_id=post_id, author=author, author_url=author_url,
+            text=text, post_url=post_url, posted_at=posted_at,
             matched_keywords=keywords,
         )
     except Exception:
@@ -237,71 +192,120 @@ def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
         return None
 
 
-def _add(results: list[HiringPost], post: Optional[HiringPost]) -> None:
-    if post and not any(p.post_id == post.post_id for p in results):
-        results.append(post)
+# ── Playwright feed fetcher ───────────────────────────────────────────────────
+
+async def _fetch_with_browser() -> list[dict]:
+    """
+    Launch headless Chromium, load session cookies, navigate to the
+    LinkedIn feed, intercept voyager API JSON responses, and return
+    the raw post elements.
+    """
+    captured: list[dict] = []
+    raw_samples: list[dict] = []
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage"],
+        )
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+
+        pw_cookies = _build_playwright_cookies()
+        logger.info("Loading %d cookies into browser …", len(pw_cookies))
+        await ctx.add_cookies(pw_cookies)
+
+        page = await ctx.new_page()
+
+        # Intercept voyager API JSON responses
+        async def on_response(resp: Response) -> None:
+            try:
+                if ("voyager/api" in resp.url and resp.status == 200
+                        and "json" in resp.headers.get("content-type", "")):
+                    body = await resp.json()
+                    elems = body.get("elements", [])
+                    if elems:
+                        captured.extend(elems)
+                        if len(raw_samples) < 3:
+                            raw_samples.extend(elems[:2])
+                        logger.info("Intercepted %d elements from …/%s",
+                                    len(elems),
+                                    resp.url.split("voyager/api/")[-1].split("?")[0])
+            except Exception:
+                pass
+
+        page.on("response", on_response)
+
+        logger.info("Navigating to linkedin.com/feed …")
+        await page.goto("https://www.linkedin.com/feed/",
+                        wait_until="domcontentloaded", timeout=60_000)
+        await asyncio.sleep(5)
+
+        final_url = page.url
+        logger.info("Final URL: %s", final_url)
+
+        if "login" in final_url or "checkpoint" in final_url or "authwall" in final_url:
+            logger.error(
+                "Redirected to %s — cookies are invalid/expired. "
+                "Re-copy li_at from browser DevTools and update the secret.",
+                final_url,
+            )
+            await browser.close()
+            return []
+
+        # Scroll to trigger more feed API calls
+        for i in range(5):
+            await page.evaluate("window.scrollBy(0, 2500)")
+            await asyncio.sleep(3)
+            logger.info("Scroll %d/5 — captured %d elements so far", i + 1, len(captured))
+            if len(captured) >= MAX_FEED_POSTS:
+                break
+
+        await browser.close()
+
+    # Save raw samples for artifact inspection
+    try:
+        RAW_DUMP.write_text(json.dumps(raw_samples, indent=2, default=str))
+        logger.info("Raw dump: %d sample elements written to %s",
+                    len(raw_samples), RAW_DUMP)
+    except Exception:
+        pass
+
+    return captured
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def fetch_hiring_posts() -> list[HiringPost]:
-    client  = _build_client()
-    results: list[HiringPost] = []
     cutoff  = datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    all_raw: list[dict] = []
+    results: list[HiringPost] = []
+    seen_ids: set[str] = set()
 
-    # ── 1. Home feed ──────────────────────────────────────────────────────────
-    logger.info("Fetching home feed (limit=%d) …", MAX_FEED_POSTS)
+    logger.info("Starting headless browser scrape (lookback=%dh) …", LOOKBACK_HOURS)
     try:
-        feed = client.get_feed_posts(limit=MAX_FEED_POSTS, exclude_promoted_posts=True)
-        logger.info("Feed: %d raw items returned", len(feed))
-        all_raw.extend(feed[:5])   # save first 5 for artifact
-
-        for raw in feed:
-            for candidate in [raw, raw.get("resharedUpdate") or {}]:
-                if not candidate:
-                    continue
-                text = _extract_text(candidate)
-                logger.debug("feed item text[:80]=%r", text[:80])
-                p = _parse(candidate, source="feed")
-                if p and p.posted_at >= cutoff:
-                    _add(results, p)
+        raw_elements = asyncio.run(_fetch_with_browser())
     except Exception:
-        logger.error("Feed fetch FAILED:\n%s", traceback.format_exc())
+        logger.error("Browser scrape failed:\n%s", traceback.format_exc())
+        raw_elements = []
 
-    # ── 2. 1st-degree connection posts ───────────────────────────────────────
-    logger.info("Fetching 1st-degree connection posts …")
-    try:
-        me     = client.get_user_profile()
-        my_urn = me.get("plainId") or (me.get("miniProfile") or {}).get("entityUrn", "").split(":")[-1]
-        if my_urn:
-            conns = client.get_profile_connections(my_urn)
-            logger.info("Connections: %d found", len(conns))
-            for conn in conns:
-                pub_id = (conn.get("miniProfile") or {}).get("publicIdentifier", "")
-                if not pub_id:
-                    continue
-                try:
-                    posts = client.get_profile_posts(public_id=pub_id, post_count=MAX_POSTS_PER_PROFILE)
-                    name  = (
-                        (conn.get("miniProfile") or {}).get("firstName", "") + " " +
-                        (conn.get("miniProfile") or {}).get("lastName", "")
-                    ).strip()
-                    for raw in posts:
-                        p = _parse(raw, source=f"connection:{name}")
-                        if p and p.posted_at >= cutoff:
-                            _add(results, p)
-                except Exception:
-                    pass
-    except Exception:
-        logger.error("Connection scan FAILED:\n%s", traceback.format_exc())
+    logger.info("Total raw elements intercepted: %d", len(raw_elements))
 
-    # ── Save raw dump artifact ────────────────────────────────────────────────
-    try:
-        RAW_DUMP.write_text(json.dumps(all_raw, indent=2, default=str))
-        logger.info("Raw dump written to %s (%d items)", RAW_DUMP, len(all_raw))
-    except Exception:
-        pass
+    for raw in raw_elements:
+        for candidate in [raw, raw.get("resharedUpdate") or {}]:
+            if not candidate:
+                continue
+            p = _parse(candidate)
+            if p and p.post_id not in seen_ids and p.posted_at >= cutoff:
+                seen_ids.add(p.post_id)
+                results.append(p)
 
     logger.info("Hiring posts found (last %dh): %d", LOOKBACK_HOURS, len(results))
     return results

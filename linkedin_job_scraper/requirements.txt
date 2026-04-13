@@ -1,5 +1,5 @@
-# LinkedIn unofficial API (voyager/mobile API wrapper)
-linkedin-api==2.1.1
+# Headless browser — bypasses LinkedIn's IP-based API blocking
+playwright==1.44.0
 
 # Scheduler
 APScheduler==3.10.4

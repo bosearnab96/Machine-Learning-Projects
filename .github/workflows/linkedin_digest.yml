@@ -20,8 +20,11 @@ jobs:
           cache: pip
           cache-dependency-path: linkedin_job_scraper/requirements.txt
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r linkedin_job_scraper/requirements.txt
+
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
 
       - name: Restore seen-posts database
         uses: actions/cache@v4
@@ -37,15 +40,12 @@ jobs:
           LINKEDIN_COOKIES:    ${{ secrets.LINKEDIN_COOKIES }}
           LINKEDIN_LI_AT:      ${{ secrets.LINKEDIN_LI_AT }}
           LINKEDIN_JSESSIONID: ${{ secrets.LINKEDIN_JSESSIONID }}
-          LINKEDIN_EMAIL:      ${{ secrets.LINKEDIN_EMAIL }}
-          LINKEDIN_PASSWORD:   ${{ secrets.LINKEDIN_PASSWORD }}
           GMAIL_SENDER:        ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:      ${{ secrets.GMAIL_PASSWORD }}
           ALERT_RECIPIENT:     ${{ secrets.ALERT_RECIPIENT }}
           DB_PATH:             seen_posts.db
         run: python scheduler.py --now
 
-      # Always upload logs + raw dump so we can debug even on success
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
