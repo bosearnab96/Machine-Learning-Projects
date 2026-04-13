@@ -1,11 +1,8 @@
 name: LinkedIn Hiring Digest
 
 on:
-  # Runs every day at 2:30 AM UTC = 8:00 AM IST
   schedule:
     - cron: "30 2 * * *"
-
-  # Also lets you trigger it manually from the GitHub Actions tab
   workflow_dispatch:
 
 jobs:
@@ -26,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r linkedin_job_scraper/requirements.txt
 
-      - name: Restore seen-posts database (cache between runs)
+      - name: Restore seen-posts database
         uses: actions/cache@v4
         with:
           path: linkedin_job_scraper/seen_posts.db
@@ -40,9 +37,20 @@ jobs:
           LINKEDIN_LI_AT:      ${{ secrets.LINKEDIN_LI_AT }}
           LINKEDIN_JSESSIONID: ${{ secrets.LINKEDIN_JSESSIONID }}
           LINKEDIN_EMAIL:      ${{ secrets.LINKEDIN_EMAIL }}
-          LINKEDIN_PASSWORD: ${{ secrets.LINKEDIN_PASSWORD }}
-          GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
-          ALERT_RECIPIENT:   ${{ secrets.ALERT_RECIPIENT }}
-          DB_PATH:           seen_posts.db
+          LINKEDIN_PASSWORD:   ${{ secrets.LINKEDIN_PASSWORD }}
+          GMAIL_SENDER:        ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:      ${{ secrets.GMAIL_PASSWORD }}
+          ALERT_RECIPIENT:     ${{ secrets.ALERT_RECIPIENT }}
+          DB_PATH:             seen_posts.db
         run: python scheduler.py --now
+
+      # Always upload logs + raw dump so we can debug even on success
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-debug
+          path: |
+            linkedin_job_scraper/scraper.log
+            linkedin_job_scraper/raw_feed_dump.json
+          retention-days: 3

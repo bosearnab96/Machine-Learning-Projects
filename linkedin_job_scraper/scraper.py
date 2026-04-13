@@ -1,20 +1,17 @@
 """
 scraper.py — Fetches LinkedIn posts and filters for hiring signals.
-
-Sources (in order):
-  1. Home feed  — posts + reactions/comments from 1st/2nd connections & follows
-  2. Connection posts — direct profile posts from each of your 1st connections
 """
 
 import json
 import logging
 import re
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 from requests.cookies import RequestsCookieJar
-
 from linkedin_api import Linkedin
 
 from config import (
@@ -30,6 +27,9 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+# Raw dump file — uploaded as GitHub Actions artifact for debugging
+RAW_DUMP = Path("raw_feed_dump.json")
+
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -41,7 +41,7 @@ class HiringPost:
     text:       str
     post_url:   str
     posted_at:  datetime
-    source:     str = ""                        # "feed" | "connection:<name>"
+    source:     str = ""
     matched_keywords: list[str] = field(default_factory=list)
 
     def short_preview(self, max_chars: int = 280) -> str:
@@ -64,85 +64,77 @@ def _is_hiring_post(text: str) -> bool:
 def _build_client() -> Linkedin:
     if LINKEDIN_LI_AT:
         logger.info("Authenticating via li_at + JSESSIONID cookies …")
-        # Must use RequestsCookieJar — plain dict causes 'extract_cookies'
-        # AttributeError when requests processes response headers.
         jar = RequestsCookieJar()
         jar.set("li_at",      LINKEDIN_LI_AT,      domain=".linkedin.com", path="/")
         jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
-        return Linkedin("", "", cookies=jar)
-    logger.info("Authenticating as %s …", LINKEDIN_EMAIL)
-    return Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+        client = Linkedin("", "", cookies=jar)
+    else:
+        logger.info("Authenticating as %s …", LINKEDIN_EMAIL)
+        client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+    logger.info("Auth complete.")
+    return client
 
 
-# ── Post text extraction ──────────────────────────────────────────────────────
+# ── Recursive text walker ─────────────────────────────────────────────────────
 
-def _extract_text(post: dict) -> str:
+def _walk_text(obj, depth=0) -> str:
     """
-    Pull the human-readable text out of a voyager post dict.
-    LinkedIn returns text in several different shapes depending on
-    post type (original, reshare, article, reaction surface).
-    We try each known location in priority order.
+    Recursively walk any dict/list structure and return the longest
+    string found under a key named 'text'. This is resilient to
+    LinkedIn silently restructuring their API response.
     """
-    # Shape 1 — direct feed update / ugcPost
-    # commentary.text.text
-    commentary = post.get("commentary") or {}
-    if isinstance(commentary, dict):
-        txt = (commentary.get("text") or {}).get("text", "")
-        if txt:
-            return txt
-
-    # Shape 2 — reshared post with original content
-    reshared = post.get("resharedUpdate") or {}
-    if reshared:
-        txt = _extract_text(reshared)
-        if txt:
-            return txt
-
-    # Shape 3 — some feed elements wrap the real update inside "value"
-    value = post.get("value") or {}
-    if value:
-        txt = _extract_text(value)
-        if txt:
-            return txt
-
-    # Shape 4 — article / rich media posts store text under "description"
-    description = post.get("description") or {}
-    if isinstance(description, dict):
-        txt = description.get("text", "")
-        if txt:
-            return txt
-
-    # Shape 5 — get_profile_posts returns slightly different structure
-    header = post.get("header") or {}
-    txt = (header.get("text") or {}).get("text", "")
-    if txt:
-        return txt
-
+    if depth > 8:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, list):
+        candidates = [_walk_text(x, depth+1) for x in obj]
+        return max(candidates, key=len) if candidates else ""
+    if isinstance(obj, dict):
+        # direct hit
+        if "text" in obj and isinstance(obj["text"], str):
+            return obj["text"]
+        # recurse into all values; prefer "commentary" and "description" keys first
+        priority = ["commentary", "description", "content", "text"]
+        seen = set()
+        results = []
+        for k in priority + [k for k in obj if k not in priority]:
+            if k in obj and k not in seen:
+                seen.add(k)
+                t = _walk_text(obj[k], depth+1)
+                if t:
+                    results.append(t)
+        return max(results, key=len) if results else ""
     return ""
 
 
+def _extract_text(post: dict) -> str:
+    # Try the known fast path first
+    commentary = post.get("commentary") or {}
+    if isinstance(commentary, dict):
+        inner = commentary.get("text") or {}
+        if isinstance(inner, dict):
+            t = inner.get("text", "")
+            if t:
+                return t
+        elif isinstance(inner, str) and inner:
+            return inner
+
+    # Fall back to recursive walker across the whole post
+    return _walk_text(post)
+
+
 def _extract_author(post: dict) -> tuple[str, str]:
-    """Return (display_name, profile_url)."""
     actor = post.get("actor") or {}
-
-    # name.text is the display string
-    name_text = (actor.get("name") or {}).get("text", "")
-
-    # miniProfile nested in name.attributes gives public ID for URL
-    attrs = (actor.get("name") or {}).get("attributes") or []
+    name_node = actor.get("name") or {}
+    name_text = name_node.get("text", "") if isinstance(name_node, dict) else str(name_node)
+    attrs = name_node.get("attributes", []) if isinstance(name_node, dict) else []
     pub_id = ""
     if attrs:
         mini = (attrs[0] or {}).get("miniProfile") or {}
         pub_id = mini.get("publicIdentifier", "")
         if not name_text:
-            first = mini.get("firstName", "")
-            last  = mini.get("lastName", "")
-            name_text = f"{first} {last}".strip()
-
-    # fallback: some profile-post responses put it under "authorProfileId"
-    if not name_text:
-        name_text = post.get("authorProfileId", "Unknown")
-
+            name_text = f"{mini.get('firstName','')} {mini.get('lastName','')}".strip()
     url = f"https://www.linkedin.com/in/{pub_id}/" if pub_id else ""
     return name_text or "Unknown", url
 
@@ -151,23 +143,19 @@ def _extract_post_id(post: dict) -> str:
     urn = (
         post.get("dashEntityUrn")
         or post.get("entityUrn")
-        or post.get("updateMetadata", {}).get("urn", "")
+        or (post.get("updateMetadata") or {}).get("urn", "")
     )
     return urn.split(":")[-1] if urn else ""
 
 
 def _extract_timestamp(post: dict) -> datetime:
-    ms = (
-        post.get("createdAt")
-        or post.get("publishedAt")
-        or post.get("actor", {}).get("subDescription", {}).get("accessibilityText", None)
-    )
-    if isinstance(ms, (int, float)) and ms > 0:
+    ms = post.get("createdAt") or post.get("publishedAt") or 0
+    if isinstance(ms, (int, float)) and ms > 1_000_000_000:
         return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     return datetime.now(tz=timezone.utc)
 
 
-# ── Core parser ───────────────────────────────────────────────────────────────
+# ── Parser ────────────────────────────────────────────────────────────────────
 
 def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
     try:
@@ -177,10 +165,11 @@ def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
         keywords = _extract_keywords(text)
         if not keywords:
             return None
-
         post_id = _extract_post_id(post)
         if not post_id:
-            return None
+            # Still include it but use a hash of the text
+            import hashlib
+            post_id = hashlib.md5(text[:200].encode()).hexdigest()
 
         author, author_url = _extract_author(post)
         posted_at = _extract_timestamp(post)
@@ -189,7 +178,6 @@ def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
             f"https://www.linkedin.com/feed/update/{entity_urn}/"
             if entity_urn else ""
         )
-
         return HiringPost(
             post_id=post_id,
             author=author,
@@ -200,102 +188,76 @@ def _parse(post: dict, source: str = "feed") -> Optional[HiringPost]:
             source=source,
             matched_keywords=keywords,
         )
-    except Exception as exc:
-        logger.debug("Parse error: %s", exc)
+    except Exception:
+        logger.debug("Parse error:\n%s", traceback.format_exc())
         return None
 
-
-# ── Dedup helper ──────────────────────────────────────────────────────────────
 
 def _add(results: list[HiringPost], post: Optional[HiringPost]) -> None:
     if post and not any(p.post_id == post.post_id for p in results):
         results.append(post)
 
 
-# ── Public interface ──────────────────────────────────────────────────────────
+# ── Public entry point ────────────────────────────────────────────────────────
 
 def fetch_hiring_posts() -> list[HiringPost]:
-    """
-    Returns HiringPost objects from:
-      • Your home feed (includes posts your connections reacted/commented on)
-      • Direct posts from each of your 1st-degree connections
-    Only posts newer than LOOKBACK_HOURS are returned.
-    """
-    client = _build_client()
+    client  = _build_client()
     results: list[HiringPost] = []
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    cutoff  = datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    all_raw: list[dict] = []
 
-    # ── 1. Home feed (1st + 2nd connections, follows, reactions, comments) ─────
-    logger.info(
-        "Fetching home feed (limit=%d, lookback=%dh) …",
-        MAX_FEED_POSTS, LOOKBACK_HOURS,
-    )
+    # ── 1. Home feed ──────────────────────────────────────────────────────────
+    logger.info("Fetching home feed (limit=%d) …", MAX_FEED_POSTS)
     try:
         feed = client.get_feed_posts(limit=MAX_FEED_POSTS, exclude_promoted_posts=True)
-        logger.info("Feed returned %d raw items", len(feed))
-
-        # ── DEBUG: log top-level keys of first 3 posts so we can fix parsing ──
-        for i, raw in enumerate(feed[:3]):
-            logger.info(
-                "DEBUG feed[%d] keys=%s | commentary=%s | text_attempt=%r",
-                i,
-                list(raw.keys()),
-                json.dumps(raw.get("commentary"), default=str)[:300],
-                _extract_text(raw)[:120],
-            )
+        logger.info("Feed: %d raw items returned", len(feed))
+        all_raw.extend(feed[:5])   # save first 5 for artifact
 
         for raw in feed:
-            p = _parse(raw, source="feed")
-            if p:
-                if p.posted_at >= cutoff:
+            for candidate in [raw, raw.get("resharedUpdate") or {}]:
+                if not candidate:
+                    continue
+                text = _extract_text(candidate)
+                logger.debug("feed item text[:80]=%r", text[:80])
+                p = _parse(candidate, source="feed")
+                if p and p.posted_at >= cutoff:
                     _add(results, p)
-                # also check the reshared original if present
-                reshared = raw.get("resharedUpdate") or {}
-                if reshared:
-                    p2 = _parse(reshared, source="feed/reshare")
-                    if p2 and p2.posted_at >= cutoff:
-                        _add(results, p2)
-    except Exception as exc:
-        logger.warning("Feed fetch failed: %s", exc)
+    except Exception:
+        logger.error("Feed fetch FAILED:\n%s", traceback.format_exc())
 
-    # ── 2. Posts from each 1st-degree connection ──────────────────────────────
-    logger.info("Fetching 1st-degree connections …")
+    # ── 2. 1st-degree connection posts ───────────────────────────────────────
+    logger.info("Fetching 1st-degree connection posts …")
     try:
-        me = client.get_user_profile()
-        my_urn = me.get("plainId") or me.get("miniProfile", {}).get("entityUrn", "").split(":")[-1]
+        me     = client.get_user_profile()
+        my_urn = me.get("plainId") or (me.get("miniProfile") or {}).get("entityUrn", "").split(":")[-1]
         if my_urn:
             conns = client.get_profile_connections(my_urn)
-            logger.info("Found %d connections — scanning their recent posts …", len(conns))
+            logger.info("Connections: %d found", len(conns))
             for conn in conns:
-                pub_id = (
-                    conn.get("miniProfile", {}).get("publicIdentifier")
-                    or conn.get("publicIdentifier", "")
-                )
+                pub_id = (conn.get("miniProfile") or {}).get("publicIdentifier", "")
                 if not pub_id:
                     continue
                 try:
-                    conn_posts = client.get_profile_posts(
-                        public_id=pub_id,
-                        post_count=MAX_POSTS_PER_PROFILE,
-                    )
-                    conn_name = (
-                        conn.get("miniProfile", {}).get("firstName", "")
-                        + " "
-                        + conn.get("miniProfile", {}).get("lastName", "")
+                    posts = client.get_profile_posts(public_id=pub_id, post_count=MAX_POSTS_PER_PROFILE)
+                    name  = (
+                        (conn.get("miniProfile") or {}).get("firstName", "") + " " +
+                        (conn.get("miniProfile") or {}).get("lastName", "")
                     ).strip()
-                    for raw in conn_posts:
-                        p = _parse(raw, source=f"connection:{conn_name}")
+                    for raw in posts:
+                        p = _parse(raw, source=f"connection:{name}")
                         if p and p.posted_at >= cutoff:
                             _add(results, p)
                 except Exception:
-                    pass   # skip individual connection failures silently
-        else:
-            logger.warning("Could not determine own URN — skipping connection scan.")
-    except Exception as exc:
-        logger.warning("Connection scan failed: %s", exc)
+                    pass
+    except Exception:
+        logger.error("Connection scan FAILED:\n%s", traceback.format_exc())
 
-    logger.info(
-        "Total hiring posts found (last %dh): %d",
-        LOOKBACK_HOURS, len(results),
-    )
+    # ── Save raw dump artifact ────────────────────────────────────────────────
+    try:
+        RAW_DUMP.write_text(json.dumps(all_raw, indent=2, default=str))
+        logger.info("Raw dump written to %s (%d items)", RAW_DUMP, len(all_raw))
+    except Exception:
+        pass
+
+    logger.info("Hiring posts found (last %dh): %d", LOOKBACK_HOURS, len(results))
     return results
