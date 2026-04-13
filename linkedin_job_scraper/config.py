@@ -47,16 +47,16 @@ HIRING_KEYWORDS = [
     "#recruitment",
 ]
 
-# ── LinkedIn search config ────────────────────────────────────────────────────
-# URNs of people/companies you want to monitor.
-# Leave empty to do a keyword-based feed search instead.
-PEOPLE_URNS_TO_MONITOR: list[str] = []
+# ── Scraping config ───────────────────────────────────────────────────────────
+# How many posts to pull from the home feed per run.
+MAX_FEED_POSTS = int(os.environ.get("MAX_FEED_POSTS", "200"))
 
-# Keyword query sent to LinkedIn's post-search endpoint.
-SEARCH_QUERY = "hiring OR \"open role\" OR \"open position\" OR \"we are hiring\""
+# How many recent posts to check per 1st-degree connection.
+MAX_POSTS_PER_PROFILE = int(os.environ.get("MAX_POSTS_PER_PROFILE", "10"))
 
-# How many posts to fetch per run (LinkedIn paginates in 10s).
-MAX_POSTS_PER_RUN = 50
+# Only surface posts newer than this many hours (default 48h).
+# 48h gives a safety buffer in case yesterday's run had an issue.
+LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
 
 # ── Gmail / SMTP settings ─────────────────────────────────────────────────────
 GMAIL_SENDER   = os.environ["GMAIL_SENDER"]    # your Gmail address
