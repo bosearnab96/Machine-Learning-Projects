@@ -63,8 +63,14 @@ def _is_hiring_post(text: str) -> bool:
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _parse_cookie_string(cookie_str: str) -> RequestsCookieJar:
-    """Parse a browser document.cookie string into a RequestsCookieJar."""
+    """
+    Parse a browser document.cookie string into a RequestsCookieJar.
+    Sets each cookie once on .linkedin.com only — no duplicates.
+    NOTE: document.cookie omits HttpOnly cookies (e.g. li_at).
+          Inject li_at separately from LINKEDIN_LI_AT secret.
+    """
     jar = RequestsCookieJar()
+    seen = set()
     for part in cookie_str.split(";"):
         part = part.strip()
         if "=" not in part:
@@ -72,26 +78,43 @@ def _parse_cookie_string(cookie_str: str) -> RequestsCookieJar:
         name, _, value = part.partition("=")
         name  = name.strip()
         value = value.strip()
+        if name in seen:
+            continue          # skip duplicates from split
+        seen.add(name)
         jar.set(name, value, domain=".linkedin.com", path="/")
-        jar.set(name, value, domain="www.linkedin.com", path="/")
     return jar
 
 
 def _build_client() -> Linkedin:
     if LINKEDIN_COOKIES:
-        logger.info("Authenticating via full browser cookie string …")
+        logger.info("Authenticating via full browser cookie string + li_at …")
         jar = _parse_cookie_string(LINKEDIN_COOKIES)
-        logger.info("Cookies loaded: %s", [c.name for c in jar])
+
+        # li_at is HttpOnly — invisible to document.cookie — inject it manually
+        if LINKEDIN_LI_AT:
+            jar.set("li_at", LINKEDIN_LI_AT, domain=".linkedin.com", path="/")
+            logger.info("Injected li_at from LINKEDIN_LI_AT secret.")
+        else:
+            logger.warning("LINKEDIN_LI_AT secret not set — session may be rejected.")
+
+        # Override JSESSIONID with the known-good value if provided
+        if LINKEDIN_JSESSIONID:
+            jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
+
+        logger.info("Cookie names in jar: %s", sorted({c.name for c in jar}))
         client = Linkedin("", "", cookies=jar)
+
     elif LINKEDIN_LI_AT:
         logger.info("Authenticating via li_at + JSESSIONID cookies …")
         jar = RequestsCookieJar()
         jar.set("li_at",      LINKEDIN_LI_AT,      domain=".linkedin.com", path="/")
         jar.set("JSESSIONID", LINKEDIN_JSESSIONID, domain=".linkedin.com", path="/")
         client = Linkedin("", "", cookies=jar)
+
     else:
         logger.info("Authenticating as %s …", LINKEDIN_EMAIL)
         client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
+
     logger.info("Auth complete.")
     return client
 
