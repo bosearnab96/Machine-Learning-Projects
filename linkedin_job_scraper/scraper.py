@@ -6,6 +6,7 @@ Sources (in order):
   2. Connection posts — direct profile posts from each of your 1st connections
 """
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -228,6 +229,17 @@ def fetch_hiring_posts() -> list[HiringPost]:
     try:
         feed = client.get_feed_posts(limit=MAX_FEED_POSTS, exclude_promoted_posts=True)
         logger.info("Feed returned %d raw items", len(feed))
+
+        # ── DEBUG: log top-level keys of first 3 posts so we can fix parsing ──
+        for i, raw in enumerate(feed[:3]):
+            logger.info(
+                "DEBUG feed[%d] keys=%s | commentary=%s | text_attempt=%r",
+                i,
+                list(raw.keys()),
+                json.dumps(raw.get("commentary"), default=str)[:300],
+                _extract_text(raw)[:120],
+            )
+
         for raw in feed:
             p = _parse(raw, source="feed")
             if p:
