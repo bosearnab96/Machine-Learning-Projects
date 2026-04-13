@@ -1,0 +1,48 @@
+name: LinkedIn Hiring Digest
+
+on:
+  # Runs every day at 2:30 AM UTC = 8:00 AM IST
+  schedule:
+    - cron: "30 2 * * *"
+
+  # Also lets you trigger it manually from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: claude/linkedin-job-scraper-Ei42i
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: linkedin_job_scraper/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r linkedin_job_scraper/requirements.txt
+
+      - name: Restore seen-posts database (cache between runs)
+        uses: actions/cache@v4
+        with:
+          path: linkedin_job_scraper/seen_posts.db
+          key: seen-posts-db-${{ github.run_id }}
+          restore-keys: |
+            seen-posts-db-
+
+      - name: Run scraper and send digest
+        working-directory: linkedin_job_scraper
+        env:
+          LINKEDIN_EMAIL:    ${{ secrets.LINKEDIN_EMAIL }}
+          LINKEDIN_PASSWORD: ${{ secrets.LINKEDIN_PASSWORD }}
+          GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
+          ALERT_RECIPIENT:   ${{ secrets.ALERT_RECIPIENT }}
+          DB_PATH:           seen_posts.db
+        run: python scheduler.py --now
