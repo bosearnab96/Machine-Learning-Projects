@@ -1,5 +1,6 @@
-# Headless browser — bypasses LinkedIn's IP-based API blocking
+# Browser automation
 playwright==1.44.0
+playwright-stealth==1.0.6
 
 # Scheduler
 APScheduler==3.10.4

@@ -23,13 +23,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r linkedin_job_scraper/requirements.txt
 
-      - name: Install Playwright system dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
             libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libpango-1.0-0 libcairo2 libasound2t64 libgbm1
+            libxrandr2 libpango-1.0-0 libcairo2 libasound2t64 libgbm1 \
+            xvfb x11-utils
 
       - name: Install Playwright browsers
         run: python -m playwright install chromium
@@ -52,7 +53,7 @@ jobs:
           GMAIL_PASSWORD:      ${{ secrets.GMAIL_PASSWORD }}
           ALERT_RECIPIENT:     ${{ secrets.ALERT_RECIPIENT }}
           DB_PATH:             seen_posts.db
-        run: python scheduler.py --now
+        run: xvfb-run -a --server-args="-screen 0 1280x800x24" python scheduler.py --now
 
       - name: Upload debug artifacts
         if: always()

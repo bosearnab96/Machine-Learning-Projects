@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from playwright.async_api import async_playwright, Response
+from playwright_stealth import stealth_async
 
 from config import (
     HIRING_KEYWORDS,
@@ -205,9 +206,14 @@ async def _fetch_with_browser() -> list[dict]:
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage"],
+            headless=False,   # non-headless via Xvfb — harder to detect
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1280,800",
+            ],
         )
         ctx = await browser.new_context(
             user_agent=(
@@ -224,6 +230,7 @@ async def _fetch_with_browser() -> list[dict]:
         await ctx.add_cookies(pw_cookies)
 
         page = await ctx.new_page()
+        await stealth_async(page)   # mask headless fingerprint
 
         # Log ALL JSON responses so we can see what LinkedIn actually calls
         all_urls_seen: list[str] = []
