@@ -12,6 +12,10 @@ load_dotenv()
 # Preferred: cookie-based auth (avoids CAPTCHA/challenge blocks on new IPs).
 # Set LINKEDIN_LI_AT to your li_at cookie value from your browser session.
 # Fallback: username + password (may trigger CHALLENGE on fresh IPs).
+# Full cookie string from browser console: copy(document.cookie)
+# This is the preferred auth method — paste ALL cookies, not just li_at.
+LINKEDIN_COOKIES   = os.environ.get("LINKEDIN_COOKIES", "")
+# Legacy individual cookie fields (fallback only)
 LINKEDIN_LI_AT     = os.environ.get("LINKEDIN_LI_AT", "")
 LINKEDIN_JSESSIONID = os.environ.get("LINKEDIN_JSESSIONID", "")
 LINKEDIN_EMAIL     = os.environ.get("LINKEDIN_EMAIL", "")

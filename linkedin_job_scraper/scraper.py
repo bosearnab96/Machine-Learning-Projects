@@ -16,6 +16,7 @@ from linkedin_api import Linkedin
 
 from config import (
     HIRING_KEYWORDS,
+    LINKEDIN_COOKIES,
     LINKEDIN_EMAIL,
     LINKEDIN_JSESSIONID,
     LINKEDIN_LI_AT,
@@ -61,8 +62,28 @@ def _is_hiring_post(text: str) -> bool:
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+def _parse_cookie_string(cookie_str: str) -> RequestsCookieJar:
+    """Parse a browser document.cookie string into a RequestsCookieJar."""
+    jar = RequestsCookieJar()
+    for part in cookie_str.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name  = name.strip()
+        value = value.strip()
+        jar.set(name, value, domain=".linkedin.com", path="/")
+        jar.set(name, value, domain="www.linkedin.com", path="/")
+    return jar
+
+
 def _build_client() -> Linkedin:
-    if LINKEDIN_LI_AT:
+    if LINKEDIN_COOKIES:
+        logger.info("Authenticating via full browser cookie string …")
+        jar = _parse_cookie_string(LINKEDIN_COOKIES)
+        logger.info("Cookies loaded: %s", [c.name for c in jar])
+        client = Linkedin("", "", cookies=jar)
+    elif LINKEDIN_LI_AT:
         logger.info("Authenticating via li_at + JSESSIONID cookies …")
         jar = RequestsCookieJar()
         jar.set("li_at",      LINKEDIN_LI_AT,      domain=".linkedin.com", path="/")
