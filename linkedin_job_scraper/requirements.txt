@@ -1,7 +1,7 @@
-# LinkedIn unofficial API (voyager/mobile API wrapper)
-linkedin-api==2.1.1
+# LinkedIn Jobs scraping — community standard library, works from GitHub Actions
+python-jobspy==1.1.82
 
-# Scheduler
+# Daily scheduler
 APScheduler==3.10.4
 
 # Environment variable loader
