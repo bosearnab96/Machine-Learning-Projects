@@ -1,9 +1,12 @@
 """
 scheduler.py — Wires everything together and runs on a daily schedule.
 
-Two modes:
+Modes:
   python scheduler.py          → starts the persistent background scheduler
-  python scheduler.py --now    → run one scrape+email cycle immediately (good for testing)
+  python scheduler.py --now    → run one scrape+email cycle immediately
+  python scheduler.py --catchup-to EMAIL
+                               → send full 7-day Tech/SDE history to EMAIL,
+                                 bypassing dedup (use once for new recipients)
 
 Two digests are sent on each run:
   1. Tech/SDE Digest    — software engineering, data, infra, ML roles
@@ -16,7 +19,6 @@ last 7 days, with posts grouped by day within each email.
 import argparse
 import logging
 import sys
-import time
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -84,6 +86,19 @@ def run_all_pipelines() -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def run_catchup(email: str) -> None:
+    """
+    Fetch the full 7-day Tech/SDE window and send it to *email* without
+    touching seen_posts.db.  Use once when adding a new recipient who has
+    never received the digest before.
+    """
+    logger.info("━━━  Catchup send to %s  ━━━", email)
+    posts = fetch_hiring_posts(TECH_SEARCH_TERMS)
+    logger.info("Fetched %d posts for catchup (no dedup applied).", len(posts))
+    send_digest(posts, "LinkedIn Tech / SDE Digest", [email])
+    logger.info("━━━  Catchup complete  ━━━\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LinkedIn Hiring Post Scraper")
     parser.add_argument(
@@ -91,9 +106,22 @@ def main() -> None:
         action="store_true",
         help="Run one scrape+email cycle immediately and exit.",
     )
+    parser.add_argument(
+        "--catchup-to",
+        metavar="EMAIL",
+        help=(
+            "Send full 7-day Tech/SDE history to EMAIL, bypassing dedup. "
+            "Use once when adding a new recipient."
+        ),
+    )
     args = parser.parse_args()
 
-    # Always initialise the DB first.
+    if args.catchup_to:
+        logger.info("Running catchup mode for %s.", args.catchup_to)
+        run_catchup(args.catchup_to)
+        return
+
+    # Always initialise the DB first for normal runs.
     init_db()
 
     if args.now:

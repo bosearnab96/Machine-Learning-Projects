@@ -1,12 +1,17 @@
 name: LinkedIn Hiring Digest
 
 on:
-  # Runs every day at 2:30 AM UTC = 8:00 AM IST
   schedule:
-    - cron: "30 2 * * *"
+    - cron: "30 2 * * *"   # 08:00 AM IST daily
 
-  # Also lets you trigger it manually from the GitHub Actions tab
   workflow_dispatch:
+    inputs:
+      catchup_email:
+        description: >
+          One-time catchup: send full 7-day Tech/SDE history to this address
+          (bypasses dedup). Leave blank for a normal run.
+        required: false
+        default: ""
 
 jobs:
   send-digest:
@@ -15,8 +20,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: claude/linkedin-job-scraper-Ei42i
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,13 +39,30 @@ jobs:
           restore-keys: |
             seen-posts-db-
 
-      - name: Run scraper and send digest
+      - name: Run catchup send (new recipient — bypasses dedup)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.catchup_email != '' }}
         working-directory: linkedin_job_scraper
         env:
-          LINKEDIN_EMAIL:    ${{ secrets.LINKEDIN_EMAIL }}
-          LINKEDIN_PASSWORD: ${{ secrets.LINKEDIN_PASSWORD }}
-          GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
-          ALERT_RECIPIENT:   ${{ secrets.ALERT_RECIPIENT }}
-          DB_PATH:           seen_posts.db
+          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+          ALERT_RECIPIENT: ${{ secrets.ALERT_RECIPIENT }}
+          DB_PATH:         seen_posts.db
+        run: python scheduler.py --catchup-to "${{ github.event.inputs.catchup_email }}"
+
+      - name: Run scraper and send digest
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.catchup_email == '' }}
+        working-directory: linkedin_job_scraper
+        env:
+          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+          ALERT_RECIPIENT: ${{ secrets.ALERT_RECIPIENT }}
+          DB_PATH:         seen_posts.db
         run: python scheduler.py --now
+
+      - name: Upload debug log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-log
+          path: linkedin_job_scraper/scraper.log
+          retention-days: 3
