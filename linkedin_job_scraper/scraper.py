@@ -104,6 +104,7 @@ def _result_to_post(result: dict) -> Optional[HiringPost]:
 
         # Only keep actual LinkedIn post/activity URLs
         if not re.search(r"linkedin\.com/(posts|feed/update)", url):
+            logger.debug("Skipped non-post URL: %s", url[:120])
             return None
 
         author, author_url = _parse_author(title, url)
@@ -125,19 +126,19 @@ def _result_to_post(result: dict) -> Optional[HiringPost]:
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def _ddg_search(query: str, max_results: int) -> list[dict]:
+def _ddg_search(query: str, max_results: int, timelimit: str = "w") -> list[dict]:
     """Run one DuckDuckGo search, return raw results."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(
                 query,
-                timelimit="d",          # last 24 hours
+                timelimit=timelimit,    # "w" = last 7 days; SQLite dedup handles "new only"
                 max_results=max_results,
             ))
-        logger.info("  Query %r → %d results", query[:60], len(results))
+        logger.info("  Query %r [timelimit=%s] → %d raw results", query[:60], timelimit, len(results))
         return results
     except Exception:
-        logger.warning("Search failed:\n%s", traceback.format_exc())
+        logger.warning("DDG search failed (timelimit=%s): %s", timelimit, traceback.format_exc())
         return []
 
 
@@ -145,26 +146,61 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
 
 def fetch_hiring_posts() -> list[HiringPost]:
     """
-    Run each configured search query against DuckDuckGo (time-limited
-    to last 24 h) and return deduplicated HiringPost objects.
+    Run each configured search query against DuckDuckGo and return
+    deduplicated HiringPost objects.
+
+    Strategy:
+      1. Try timelimit="w" (last 7 days) — wide enough for DDG's indexing lag.
+      2. If every query returns 0 raw results, fall back to timelimit=None
+         so we can verify DDG is reachable at all (dedup DB prevents re-sends).
     """
     results_map: dict[str, HiringPost] = {}   # post_id → HiringPost
+    total_raw = 0
 
     logger.info("Running %d search queries …", len(SEARCH_QUERIES))
 
     for i, query in enumerate(SEARCH_QUERIES):
-        raw = _ddg_search(query, MAX_SEARCH_RESULTS)
+        raw = _ddg_search(query, MAX_SEARCH_RESULTS, timelimit="w")
+        total_raw += len(raw)
 
         for r in raw:
             post = _result_to_post(r)
             if post and post.post_id not in results_map:
                 results_map[post.post_id] = post
 
-        # Polite pause between queries to avoid rate limiting
         if i < len(SEARCH_QUERIES) - 1:
             pause = SEARCH_PAUSE_SECONDS + random.uniform(0, 1)
             time.sleep(pause)
 
+    # ── Fallback: if DDG returned nothing at all, retry without timelimit ──────
+    if total_raw == 0:
+        logger.warning(
+            "All %d queries returned 0 raw results with timelimit='w'. "
+            "Retrying without time limit (DDG may be slow to index LinkedIn).",
+            len(SEARCH_QUERIES),
+        )
+        for i, query in enumerate(SEARCH_QUERIES):
+            raw = _ddg_search(query, MAX_SEARCH_RESULTS, timelimit=None)
+            total_raw += len(raw)
+
+            for r in raw:
+                post = _result_to_post(r)
+                if post and post.post_id not in results_map:
+                    results_map[post.post_id] = post
+
+            if i < len(SEARCH_QUERIES) - 1:
+                pause = SEARCH_PAUSE_SECONDS + random.uniform(0, 1)
+                time.sleep(pause)
+
+    if total_raw == 0:
+        logger.error(
+            "DDG returned 0 raw results even without a time filter. "
+            "This suggests DuckDuckGo may be rate-limiting this IP."
+        )
+
     results = list(results_map.values())
-    logger.info("Unique hiring posts found: %d", len(results))
+    logger.info(
+        "Total raw DDG results: %d  |  Unique hiring posts after filtering: %d",
+        total_raw, len(results),
+    )
     return results

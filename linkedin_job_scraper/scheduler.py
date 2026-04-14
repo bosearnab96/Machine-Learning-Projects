@@ -21,7 +21,7 @@ from storage import filter_new_posts, init_db
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
