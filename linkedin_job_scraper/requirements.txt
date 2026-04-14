@@ -1,5 +1,6 @@
-# LinkedIn post discovery via DuckDuckGo search (no auth, no IP blocks)
-duckduckgo-search==6.2.4
+# Bing web search scraping (no API key, not blocked on GitHub Actions / Azure)
+requests==2.32.3
+beautifulsoup4==4.12.3
 
 # Daily scheduler
 APScheduler==3.10.4

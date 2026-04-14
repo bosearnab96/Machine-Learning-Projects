@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Search queries ────────────────────────────────────────────────────────────
-# Each query is sent to DuckDuckGo with timelimit="d" (last 24 h).
+# Each query is sent to Bing with an `after:YYYY-MM-DD` date filter (last 7 days).
 # Results are filtered to linkedin.com/posts and linkedin.com/feed URLs only.
 # Customise freely — add roles, locations, industries, etc.
 SEARCH_QUERIES = [
@@ -19,44 +19,11 @@ SEARCH_QUERIES = [
     'site:linkedin.com "apply now" OR "apply here" OR "dm me" AND "hiring"',
 ]
 
-# Max results per query (DuckDuckGo caps around 20-25 for time-limited searches)
+# Max results per query
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "25"))
 
-# Seconds to wait between queries (avoids DuckDuckGo rate limits)
-SEARCH_PAUSE_SECONDS = float(os.environ.get("SEARCH_PAUSE_SECONDS", "2"))
-
-# ── Keyword filter ────────────────────────────────────────────────────────────
-# A post must match at least one of these to be included in the digest.
-HIRING_KEYWORDS = [
-    "we are hiring",
-    "we're hiring",
-    "now hiring",
-    "open role",
-    "open position",
-    "open requisition",
-    "open req",
-    "job opening",
-    "looking for",
-    "join our team",
-    "join my team",
-    "apply now",
-    "apply here",
-    "we have an opening",
-    "exciting opportunity",
-    "referral",
-    "dm me",
-    "#hiring",
-    "#opentowork",
-    "#job",
-    "#jobs",
-    "#careers",
-    "#recruitment",
-    "hiring",
-]
-
-# ── Lookback window ───────────────────────────────────────────────────────────
-# DuckDuckGo already limits to last 24 h; this is a secondary safety filter.
-LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
+# Seconds to wait between queries (be polite to Bing)
+SEARCH_PAUSE_SECONDS = float(os.environ.get("SEARCH_PAUSE_SECONDS", "3"))
 
 # ── Gmail / SMTP ──────────────────────────────────────────────────────────────
 GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
