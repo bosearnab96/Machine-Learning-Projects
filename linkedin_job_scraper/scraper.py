@@ -28,7 +28,6 @@ from config import (
     HIRING_KEYWORDS,
     HOURS_OLD,
     JOB_LOCATION,
-    JOB_SEARCH_TERMS,
     MAX_RESULTS_PER_TERM,
 )
 
@@ -45,6 +44,7 @@ class HiringPost:
     text:       str           # job title + location + description snippet
     post_url:   str           # direct link to the job listing
     posted_at:  datetime
+    is_remote:  bool = False
     source:     str = "linkedin_jobs"
     matched_keywords: list[str] = field(default_factory=list)
 
@@ -78,7 +78,6 @@ def _extract_keywords(title: str, description: str) -> list[str]:
     combined = f"{title} {description}".lower()
     matched = [kw for kw in HIRING_KEYWORDS if kw.lower() in combined]
     if not matched:
-        # Fall back to seniority / role words from the title
         fallbacks = ["senior", "lead", "staff", "principal", "junior", "mid",
                      "engineer", "manager", "analyst", "designer", "developer",
                      "scientist", "architect", "consultant", "director"]
@@ -86,21 +85,36 @@ def _extract_keywords(title: str, description: str) -> list[str]:
     return matched[:6] if matched else ["hiring"]
 
 
+def _is_relevant_location(row) -> bool:
+    """Keep only jobs in Bangalore/Bengaluru or fully remote."""
+    location = str(row.get("location") or "").lower()
+    is_remote = bool(row.get("is_remote") or False)
+    return (
+        "bangalore" in location
+        or "bengaluru" in location
+        or "remote" in location
+        or is_remote
+    )
+
+
 def _row_to_post(row) -> Optional[HiringPost]:
     try:
-        job_id   = row.get("id", "")
-        url      = str(row.get("job_url") or "")
-        title    = str(row.get("title") or "Unknown Role")
-        company  = str(row.get("company") or "Unknown Company")
-        location = str(row.get("location") or "")
-        desc     = str(row.get("description") or "")
-        co_url   = str(row.get("company_url") or "")
-        posted   = _to_datetime(row.get("date_posted"))
+        job_id    = row.get("id", "")
+        url       = str(row.get("job_url") or "")
+        title     = str(row.get("title") or "Unknown Role")
+        company   = str(row.get("company") or "Unknown Company")
+        location  = str(row.get("location") or "")
+        desc      = str(row.get("description") or "")
+        co_url    = str(row.get("company_url") or "")
+        posted    = _to_datetime(row.get("date_posted"))
+        is_remote = bool(row.get("is_remote") or False)
 
         # Build a readable text block: title + location header + description
         text = f"{title} at {company}"
         if location:
             text += f"\n📍 {location}"
+        if is_remote:
+            text += "  🌐 Remote"
         if desc:
             text += f"\n\n{desc[:600]}"
 
@@ -114,6 +128,7 @@ def _row_to_post(row) -> Optional[HiringPost]:
             text=text,
             post_url=url,
             posted_at=posted,
+            is_remote=is_remote,
             matched_keywords=keywords,
         )
     except Exception:
@@ -123,10 +138,12 @@ def _row_to_post(row) -> Optional[HiringPost]:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def fetch_hiring_posts() -> list[HiringPost]:
+def fetch_hiring_posts(search_terms: list[str]) -> list[HiringPost]:
     """
-    Scrape LinkedIn Jobs for each configured search term and return
+    Scrape LinkedIn Jobs for the given search terms and return
     deduplicated HiringPost objects.
+
+    Only jobs located in Bangalore/Bengaluru or marked as remote are kept.
 
     JobSpy keeps requests low-volume and mimics real browser behaviour,
     so it works reliably from GitHub Actions at once-daily frequency.
@@ -135,10 +152,10 @@ def fetch_hiring_posts() -> list[HiringPost]:
 
     logger.info(
         "Scraping LinkedIn Jobs via JobSpy — %d search terms, location=%r, hours_old=%d",
-        len(JOB_SEARCH_TERMS), JOB_LOCATION, HOURS_OLD,
+        len(search_terms), JOB_LOCATION, HOURS_OLD,
     )
 
-    for term in JOB_SEARCH_TERMS:
+    for term in search_terms:
         logger.info("  Searching: %r …", term)
         try:
             df = scrape_jobs(
@@ -160,10 +177,17 @@ def fetch_hiring_posts() -> list[HiringPost]:
 
         logger.info("    %d listings returned", len(df))
 
+        kept = 0
         for _, row in df.iterrows():
-            post = _row_to_post(row.to_dict())
+            row_dict = row.to_dict()
+            if not _is_relevant_location(row_dict):
+                continue
+            post = _row_to_post(row_dict)
             if post and post.post_id not in results_map:
                 results_map[post.post_id] = post
+                kept += 1
+
+        logger.info("    %d kept after Bangalore/remote filter", kept)
 
     total = len(results_map)
     logger.info("Unique hiring listings found: %d", total)

@@ -8,29 +8,44 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── LinkedIn Jobs search ───────────────────────────────────────────────────────
-# JobSpy searches LinkedIn Jobs for each term below.
-# Add or remove roles you care about. Keep the list short (3-6 terms) to stay
-# well within LinkedIn's undocumented rate limits.
-JOB_SEARCH_TERMS = [
+# Tech / SDE digest — roles involving coding, infrastructure, data engineering
+TECH_SEARCH_TERMS = [
     "software engineer",
-    "product manager",
-    "data scientist",
-    "engineering manager",
+    "SDE",
+    "software developer",
+    "backend engineer",
+    "frontend engineer",
+    "full stack engineer",
+    "data engineer",
     "machine learning engineer",
+    "platform engineer",
+    "devops engineer",
 ]
 
-# Geographic filter — "India", "Mumbai", "Bangalore", etc.
-JOB_LOCATION = os.environ.get("JOB_LOCATION", "India")
+# Generalist digest — strategy, growth, ops, creator economy, revenue roles
+GENERALIST_SEARCH_TERMS = [
+    "strategy operations",
+    "growth",
+    "chief of staff",
+    "entrepreneur in residence",
+    "revenue lead",
+    "monetization",
+    "creator economy",
+    "business operations",
+]
 
-# Only include jobs posted within this many hours (24 = today's postings only)
-HOURS_OLD = int(os.environ.get("HOURS_OLD", "24"))
+# Geographic filter — searches LinkedIn Jobs for this location.
+# Remote jobs are always included via post-filter regardless of this value.
+JOB_LOCATION = os.environ.get("JOB_LOCATION", "Bangalore, India")
+
+# Only include jobs posted within this many hours (168 = last 7 days)
+HOURS_OLD = int(os.environ.get("HOURS_OLD", "168"))
 
 # Max listings fetched per search term
 MAX_RESULTS_PER_TERM = int(os.environ.get("MAX_RESULTS_PER_TERM", "25"))
 
 # ── Keyword filter ────────────────────────────────────────────────────────────
-# Used to extract badge labels shown in the email. All JobSpy results are
-# hiring listings by definition, so this is display-only.
+# Used to extract badge labels shown in the email.
 HIRING_KEYWORDS = [
     "we are hiring",
     "we're hiring",
