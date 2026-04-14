@@ -1,5 +1,5 @@
 # LinkedIn Jobs scraping — community standard library, works from GitHub Actions
-python-jobspy==0.2.0
+python-jobspy==1.1.82
 
 # Daily scheduler
 APScheduler==3.10.4
