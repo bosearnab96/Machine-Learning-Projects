@@ -1,6 +1,5 @@
-# Bing web search scraping (no API key, not blocked on GitHub Actions / Azure)
-requests==2.32.3
-beautifulsoup4==4.12.3
+# LinkedIn Jobs scraping — community standard library, works from GitHub Actions
+python-jobspy==0.2.0
 
 # Daily scheduler
 APScheduler==3.10.4

@@ -7,26 +7,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Search queries ────────────────────────────────────────────────────────────
-# Each query is sent to Bing with an `after:YYYY-MM-DD` date filter (last 7 days).
-# Results are filtered to linkedin.com/posts and linkedin.com/feed URLs only.
-# Customise freely — add roles, locations, industries, etc.
-SEARCH_QUERIES = [
-    'site:linkedin.com "we are hiring" OR "we\'re hiring" OR "now hiring"',
-    'site:linkedin.com "open role" OR "open position" OR "open requisition"',
-    'site:linkedin.com "#hiring" OR "join our team" OR "job opening"',
-    'site:linkedin.com "looking for" AND ("engineer" OR "manager" OR "analyst" OR "designer")',
-    'site:linkedin.com "apply now" OR "apply here" OR "dm me" AND "hiring"',
+# ── LinkedIn Jobs search ───────────────────────────────────────────────────────
+# JobSpy searches LinkedIn Jobs for each term below.
+# Add or remove roles you care about. Keep the list short (3-6 terms) to stay
+# well within LinkedIn's undocumented rate limits.
+JOB_SEARCH_TERMS = [
+    "software engineer",
+    "product manager",
+    "data scientist",
+    "engineering manager",
+    "machine learning engineer",
 ]
 
-# Max results per query
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "25"))
+# Geographic filter — "India", "Mumbai", "Bangalore", etc.
+JOB_LOCATION = os.environ.get("JOB_LOCATION", "India")
 
-# Seconds to wait between queries (be polite to Bing)
-SEARCH_PAUSE_SECONDS = float(os.environ.get("SEARCH_PAUSE_SECONDS", "3"))
+# Only include jobs posted within this many hours (24 = today's postings only)
+HOURS_OLD = int(os.environ.get("HOURS_OLD", "24"))
+
+# Max listings fetched per search term
+MAX_RESULTS_PER_TERM = int(os.environ.get("MAX_RESULTS_PER_TERM", "25"))
 
 # ── Keyword filter ────────────────────────────────────────────────────────────
-# A post must match at least one of these to be included in the digest.
+# Used to extract badge labels shown in the email. All JobSpy results are
+# hiring listings by definition, so this is display-only.
 HIRING_KEYWORDS = [
     "we are hiring",
     "we're hiring",

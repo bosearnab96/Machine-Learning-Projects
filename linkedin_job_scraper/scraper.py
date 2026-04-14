@@ -1,57 +1,38 @@
 """
-scraper.py — Finds LinkedIn hiring posts via Bing web search.
+scraper.py — Finds LinkedIn hiring posts via python-jobspy.
 
-Why Bing?
-  LinkedIn blocks all automated access from cloud/datacenter IPs.
-  DuckDuckGo also blocks GitHub Actions IPs (returns HTTP 202 for every query).
+Why JobSpy?
+  LinkedIn blocks direct scraping from datacenter IPs.
+  DuckDuckGo and Bing search APIs also block GitHub Actions IPs.
 
-  Bing is operated by Microsoft on Azure — the same infrastructure as
-  GitHub Actions — so it does NOT block Azure datacenter IPs.  We scrape
-  Bing's HTML results page with requests + BeautifulSoup (no API key needed).
-  Public LinkedIn posts are well-indexed by Bing.
+  python-jobspy (github.com/speedyapply/JobSpy) is the community-standard
+  library for scraping LinkedIn Jobs without authentication or API keys.
+  It works from GitHub Actions at low frequency (once daily) because it
+  mimics normal browser behaviour and stays well within LinkedIn's
+  undocumented rate limits.
+
+  Results are LinkedIn job listings — structured hiring announcements
+  from companies, which is exactly what we want.
 """
 
 import hashlib
 import logging
-import re
-import time
-import random
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, date as date_type
 from typing import Optional
 
-import requests
-from bs4 import BeautifulSoup
+from jobspy import scrape_jobs
 
 from config import (
     HIRING_KEYWORDS,
-    MAX_SEARCH_RESULTS,
-    SEARCH_QUERIES,
-    SEARCH_PAUSE_SECONDS,
+    HOURS_OLD,
+    JOB_LOCATION,
+    JOB_SEARCH_TERMS,
+    MAX_RESULTS_PER_TERM,
 )
 
 logger = logging.getLogger(__name__)
-
-# Rotate through a few realistic User-Agent strings so individual queries
-# don't all look identical at the HTTP layer.
-_USER_AGENTS = [
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-]
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -59,199 +40,139 @@ _USER_AGENTS = [
 @dataclass
 class HiringPost:
     post_id:    str
-    author:     str
-    author_url: str
-    text:       str
-    post_url:   str
+    author:     str           # company name
+    author_url: str           # company LinkedIn URL
+    text:       str           # job title + location + description snippet
+    post_url:   str           # direct link to the job listing
     posted_at:  datetime
-    source:     str = "search"
+    source:     str = "linkedin_jobs"
     matched_keywords: list[str] = field(default_factory=list)
 
     def short_preview(self, max_chars: int = 280) -> str:
+        import re
         cleaned = re.sub(r"\s+", " ", self.text).strip()
         return cleaned[:max_chars] + ("…" if len(cleaned) > max_chars else "")
 
 
-# ── Keyword matching ──────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _extract_keywords(text: str) -> list[str]:
-    lower = text.lower()
-    return [kw for kw in HIRING_KEYWORDS if kw.lower() in lower]
-
-
-# ── Result parsing ────────────────────────────────────────────────────────────
-
-def _parse_author(title: str, url: str) -> tuple[str, str]:
-    """
-    Bing titles for LinkedIn posts look like:
-      'Arnab Bose on LinkedIn: We are hiring…'
-      'Mitul Goyal on LinkedIn: Hiring: Program Manager…'
-    Extract the name and build a profile URL from the post URL.
-    """
-    m = re.match(r"^(.+?)\s+on LinkedIn", title or "", re.IGNORECASE)
-    author_name = m.group(1).strip() if m else "LinkedIn User"
-
-    # Profile URL: linkedin.com/posts/username_... → linkedin.com/in/username
-    pub_id = ""
-    m2 = re.search(r"linkedin\.com/posts/([^_/]+)", url or "")
-    if m2:
-        pub_id = m2.group(1)
-    author_url = f"https://www.linkedin.com/in/{pub_id}/" if pub_id else ""
-
-    return author_name, author_url
+def _to_datetime(d) -> datetime:
+    """Convert a date, datetime, or None to a timezone-aware datetime."""
+    if d is None:
+        return datetime.now(tz=timezone.utc)
+    if isinstance(d, datetime):
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    if isinstance(d, date_type):
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return datetime.now(tz=timezone.utc)
 
 
-def _make_post_id(url: str, text: str) -> str:
-    # Prefer the activity ID from the URL
-    m = re.search(r"activity-(\d+)", url or "")
-    if m:
-        return m.group(1)
-    return hashlib.md5((url + text[:100]).encode()).hexdigest()
+def _make_post_id(job_id, url: str) -> str:
+    if job_id and str(job_id).strip():
+        return str(job_id).strip()
+    return hashlib.md5((url or "").encode()).hexdigest()
 
 
-def _result_to_post(result: dict) -> Optional[HiringPost]:
-    """Convert a Bing search result dict into a HiringPost."""
+def _extract_keywords(title: str, description: str) -> list[str]:
+    """Return matched HIRING_KEYWORDS from title + description, else role labels."""
+    combined = f"{title} {description}".lower()
+    matched = [kw for kw in HIRING_KEYWORDS if kw.lower() in combined]
+    if not matched:
+        # Fall back to seniority / role words from the title
+        fallbacks = ["senior", "lead", "staff", "principal", "junior", "mid",
+                     "engineer", "manager", "analyst", "designer", "developer",
+                     "scientist", "architect", "consultant", "director"]
+        matched = [w for w in fallbacks if w in title.lower()]
+    return matched[:6] if matched else ["hiring"]
+
+
+def _row_to_post(row) -> Optional[HiringPost]:
     try:
-        url   = result.get("href", "")
-        title = result.get("title", "")
-        body  = result.get("body", "")
+        job_id   = row.get("id", "")
+        url      = str(row.get("job_url") or "")
+        title    = str(row.get("title") or "Unknown Role")
+        company  = str(row.get("company") or "Unknown Company")
+        location = str(row.get("location") or "")
+        desc     = str(row.get("description") or "")
+        co_url   = str(row.get("company_url") or "")
+        posted   = _to_datetime(row.get("date_posted"))
 
-        # Combine title + body for keyword matching
-        full_text = f"{title}\n{body}".strip()
-        keywords  = _extract_keywords(full_text)
-        if not keywords:
-            return None
+        # Build a readable text block: title + location header + description
+        text = f"{title} at {company}"
+        if location:
+            text += f"\n📍 {location}"
+        if desc:
+            text += f"\n\n{desc[:600]}"
 
-        # Only keep actual LinkedIn post/activity URLs
-        if not re.search(r"linkedin\.com/(posts|feed/update)", url):
-            logger.debug("Skipped non-post URL: %s", url[:120])
-            return None
-
-        author, author_url = _parse_author(title, url)
-        post_id = _make_post_id(url, full_text)
+        post_id  = _make_post_id(job_id, url)
+        keywords = _extract_keywords(title, desc[:300])
 
         return HiringPost(
             post_id=post_id,
-            author=author,
-            author_url=author_url,
-            text=full_text,
+            author=company,
+            author_url=co_url,
+            text=text,
             post_url=url,
-            posted_at=datetime.now(tz=timezone.utc),
+            posted_at=posted,
             matched_keywords=keywords,
         )
     except Exception:
-        logger.debug("Parse error:\n%s", traceback.format_exc())
+        logger.debug("Row parse error:\n%s", traceback.format_exc())
         return None
-
-
-# ── Search ────────────────────────────────────────────────────────────────────
-
-def _bing_search(query: str, max_results: int) -> list[dict]:
-    """
-    Scrape Bing web search for `query`, returning up to `max_results`
-    results as {href, title, body} dicts — the same shape our parser expects.
-
-    Appends `after:YYYY-MM-DD` (7 days ago) so results stay recent.
-    Bing paginates in batches of 10; we fetch as many pages as needed.
-    """
-    week_ago = (datetime.now(tz=timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-    dated_query = f"{query} after:{week_ago}"
-
-    session = requests.Session()
-    ua = random.choice(_USER_AGENTS)
-    session.headers.update({
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    })
-
-    results: list[dict] = []
-    offset = 1  # Bing uses 1-based pagination (first=1, 11, 21, …)
-
-    while len(results) < max_results:
-        try:
-            resp = session.get(
-                "https://www.bing.com/search",
-                params={
-                    "q":       dated_query,
-                    "first":   offset,
-                    "count":   10,
-                    "setlang": "en-US",
-                    "cc":      "US",
-                },
-                timeout=20,
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            logger.warning("Bing request failed at offset %d: %s", offset, exc)
-            break
-
-        soup  = BeautifulSoup(resp.text, "html.parser")
-        items = soup.select("li.b_algo")
-        logger.debug("  Bing offset=%d → %d result items in page", offset, len(items))
-
-        if not items:
-            logger.debug("  No more Bing results for query %r", query[:60])
-            break
-
-        for item in items:
-            title_a = item.select_one("h2 a")
-            caption = item.select_one(".b_caption p") or item.select_one(".b_algoSlug")
-            if not title_a:
-                continue
-            results.append({
-                "href":  title_a.get("href", ""),
-                "title": title_a.get_text(strip=True),
-                "body":  caption.get_text(strip=True) if caption else "",
-            })
-
-        offset += 10
-        if len(items) < 10:
-            break   # last page reached
-
-    logger.info("  Bing query %r → %d raw results", query[:60], len(results))
-    return results[:max_results]
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def fetch_hiring_posts() -> list[HiringPost]:
     """
-    Run each configured search query against Bing (last 7 days via after:)
-    and return deduplicated HiringPost objects.
-    SQLite deduplication in storage.py ensures only genuinely new posts
-    are emailed each day.
+    Scrape LinkedIn Jobs for each configured search term and return
+    deduplicated HiringPost objects.
+
+    JobSpy keeps requests low-volume and mimics real browser behaviour,
+    so it works reliably from GitHub Actions at once-daily frequency.
     """
-    results_map: dict[str, HiringPost] = {}   # post_id → HiringPost
-    total_raw = 0
+    results_map: dict[str, HiringPost] = {}
 
-    logger.info("Running %d Bing search queries …", len(SEARCH_QUERIES))
+    logger.info(
+        "Scraping LinkedIn Jobs via JobSpy — %d search terms, location=%r, hours_old=%d",
+        len(JOB_SEARCH_TERMS), JOB_LOCATION, HOURS_OLD,
+    )
 
-    for i, query in enumerate(SEARCH_QUERIES):
-        raw = _bing_search(query, MAX_SEARCH_RESULTS)
-        total_raw += len(raw)
+    for term in JOB_SEARCH_TERMS:
+        logger.info("  Searching: %r …", term)
+        try:
+            df = scrape_jobs(
+                site_name=["linkedin"],
+                search_term=term,
+                location=JOB_LOCATION,
+                results_wanted=MAX_RESULTS_PER_TERM,
+                hours_old=HOURS_OLD,
+                linkedin_fetch_description=True,
+                verbose=0,
+            )
+        except Exception:
+            logger.warning("JobSpy failed for term %r:\n%s", term, traceback.format_exc())
+            continue
 
-        for r in raw:
-            post = _result_to_post(r)
+        if df is None or df.empty:
+            logger.info("    No results for %r", term)
+            continue
+
+        logger.info("    %d listings returned", len(df))
+
+        for _, row in df.iterrows():
+            post = _row_to_post(row.to_dict())
             if post and post.post_id not in results_map:
                 results_map[post.post_id] = post
 
-        if i < len(SEARCH_QUERIES) - 1:
-            pause = SEARCH_PAUSE_SECONDS + random.uniform(0, 1)
-            time.sleep(pause)
+    total = len(results_map)
+    logger.info("Unique hiring listings found: %d", total)
 
-    if total_raw == 0:
-        logger.error(
-            "Bing returned 0 raw results across all %d queries. "
-            "Check network connectivity or whether Bing has changed its HTML structure.",
-            len(SEARCH_QUERIES),
+    if total == 0:
+        logger.warning(
+            "No listings returned. This can happen if LinkedIn throttled the "
+            "request. The daily scheduled run (not manual trigger) is less "
+            "likely to be throttled."
         )
 
-    results = list(results_map.values())
-    logger.info(
-        "Total raw Bing results: %d  |  Unique hiring posts after filtering: %d",
-        total_raw, len(results),
-    )
-    return results
+    return list(results_map.values())
