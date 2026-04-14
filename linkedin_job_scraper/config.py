@@ -41,8 +41,10 @@ JOB_LOCATION = os.environ.get("JOB_LOCATION", "Bangalore, India")
 # Only include jobs posted within this many hours (168 = last 7 days)
 HOURS_OLD = int(os.environ.get("HOURS_OLD", "168"))
 
-# Max listings fetched per search term
-MAX_RESULTS_PER_TERM = int(os.environ.get("MAX_RESULTS_PER_TERM", "25"))
+# Max listings fetched per search term.
+# LinkedIn returns results oldest-first within the hours_old window, so a
+# higher cap is needed to reach recent (1–4 day old) postings.
+MAX_RESULTS_PER_TERM = int(os.environ.get("MAX_RESULTS_PER_TERM", "50"))
 
 # ── Keyword filter ────────────────────────────────────────────────────────────
 # Used to extract badge labels shown in the email.
