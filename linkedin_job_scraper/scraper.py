@@ -1,26 +1,34 @@
 """
-scraper.py — Fetches LinkedIn posts and filters for hiring signals.
+scraper.py — Finds LinkedIn hiring posts via python-jobspy.
 
-Uses the unofficial `linkedin-api` library which wraps LinkedIn's
-internal mobile/voyager API. No browser automation needed.
+Why JobSpy?
+  LinkedIn blocks direct scraping from datacenter IPs.
+  DuckDuckGo and Bing search APIs also block GitHub Actions IPs.
 
-Docs: https://github.com/tomquirk/linkedin-api
+  python-jobspy (github.com/speedyapply/JobSpy) is the community-standard
+  library for scraping LinkedIn Jobs without authentication or API keys.
+  It works from GitHub Actions at low frequency (once daily) because it
+  mimics normal browser behaviour and stays well within LinkedIn's
+  undocumented rate limits.
+
+  Results are LinkedIn job listings — structured hiring announcements
+  from companies, which is exactly what we want.
 """
 
+import hashlib
 import logging
-import re
+import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 from typing import Optional
 
-from linkedin_api import Linkedin
+from jobspy import scrape_jobs
 
 from config import (
     HIRING_KEYWORDS,
-    LINKEDIN_EMAIL,
-    LINKEDIN_PASSWORD,
-    MAX_POSTS_PER_RUN,
-    SEARCH_QUERY,
+    HOURS_OLD,
+    JOB_LOCATION,
+    MAX_RESULTS_PER_TERM,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,140 +39,164 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HiringPost:
     post_id:    str
-    author:     str
-    author_url: str
-    text:       str
-    post_url:   str
+    author:     str           # company name
+    author_url: str           # company LinkedIn URL
+    text:       str           # job title + location + description snippet
+    post_url:   str           # direct link to the job listing
     posted_at:  datetime
+    is_remote:  bool = False
+    source:     str = "linkedin_jobs"
     matched_keywords: list[str] = field(default_factory=list)
 
     def short_preview(self, max_chars: int = 280) -> str:
+        import re
         cleaned = re.sub(r"\s+", " ", self.text).strip()
         return cleaned[:max_chars] + ("…" if len(cleaned) > max_chars else "")
 
 
-# ── Keyword matching ──────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _extract_keywords(text: str) -> list[str]:
-    """Return every HIRING_KEYWORD found (case-insensitive) in *text*."""
-    lower = text.lower()
-    return [kw for kw in HIRING_KEYWORDS if kw.lower() in lower]
-
-
-def _is_hiring_post(text: str) -> bool:
-    return bool(_extract_keywords(text))
-
-
-# ── LinkedIn client ───────────────────────────────────────────────────────────
-
-def _build_client() -> Linkedin:
-    """Authenticate and return a LinkedIn API client."""
-    logger.info("Authenticating with LinkedIn as %s …", LINKEDIN_EMAIL)
-    client = Linkedin(LINKEDIN_EMAIL, LINKEDIN_PASSWORD)
-    logger.info("Authenticated successfully.")
-    return client
+def _to_datetime(d) -> datetime:
+    """Convert a date, datetime, or None to a timezone-aware datetime."""
+    if d is None:
+        return datetime.now(tz=timezone.utc)
+    if isinstance(d, datetime):
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    if isinstance(d, date_type):
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return datetime.now(tz=timezone.utc)
 
 
-# ── Post parsing helpers ──────────────────────────────────────────────────────
+def _make_post_id(job_id, url: str) -> str:
+    if job_id and str(job_id).strip():
+        return str(job_id).strip()
+    return hashlib.md5((url or "").encode()).hexdigest()
 
-def _parse_post(raw: dict) -> Optional[HiringPost]:
-    """
-    Convert a raw voyager API post dict into a HiringPost.
-    Returns None if the post doesn't match any hiring keyword.
-    """
+
+def _extract_keywords(title: str, description: str) -> list[str]:
+    """Return matched HIRING_KEYWORDS from title + description, else role labels."""
+    combined = f"{title} {description}".lower()
+    matched = [kw for kw in HIRING_KEYWORDS if kw.lower() in combined]
+    if not matched:
+        fallbacks = ["senior", "lead", "staff", "principal", "junior", "mid",
+                     "engineer", "manager", "analyst", "designer", "developer",
+                     "scientist", "architect", "consultant", "director"]
+        matched = [w for w in fallbacks if w in title.lower()]
+    return matched[:6] if matched else ["hiring"]
+
+
+def _is_relevant_location(row) -> bool:
+    """Keep only jobs in Bangalore/Bengaluru or fully remote."""
+    location = str(row.get("location") or "").lower()
+    is_remote = bool(row.get("is_remote") or False)
+    return (
+        "bangalore" in location
+        or "bengaluru" in location
+        or "remote" in location
+        or is_remote
+    )
+
+
+def _row_to_post(row) -> Optional[HiringPost]:
     try:
-        # The voyager response structure varies; handle both feed and search shapes.
-        value = raw.get("value", raw)  # search results wrap in "value"
+        job_id    = row.get("id", "")
+        url       = str(row.get("job_url") or "")
+        title     = str(row.get("title") or "Unknown Role")
+        company   = str(row.get("company") or "Unknown Company")
+        location  = str(row.get("location") or "")
+        desc      = str(row.get("description") or "")
+        co_url    = str(row.get("company_url") or "")
+        posted    = _to_datetime(row.get("date_posted"))
+        is_remote = bool(row.get("is_remote") or False)
 
-        # ── text ──
-        commentary = value.get("commentary", {})
-        if isinstance(commentary, dict):
-            text = commentary.get("text", {}).get("text", "")
-        else:
-            text = str(commentary)
+        # Build a readable text block: title + location header + description
+        text = f"{title} at {company}"
+        if location:
+            text += f"\n📍 {location}"
+        if is_remote:
+            text += "  🌐 Remote"
+        if desc:
+            text += f"\n\n{desc[:600]}"
 
-        if not text or not _is_hiring_post(text):
-            return None
-
-        # ── post ID / URL ──
-        entity_urn = value.get("entityUrn", "")          # urn:li:ugcPost:123…
-        post_id    = entity_urn.split(":")[-1] if entity_urn else raw.get("id", "")
-        post_url   = (
-            f"https://www.linkedin.com/feed/update/{entity_urn}/"
-            if entity_urn else ""
-        )
-
-        # ── author ──
-        actor = value.get("actor", {})
-        name_map = (
-            actor.get("name", {})
-                 .get("attributes", [{}])[0]
-                 .get("miniProfile", {})
-        ) if actor else {}
-
-        first = name_map.get("firstName", "")
-        last  = name_map.get("lastName", "")
-        author_name = f"{first} {last}".strip() or actor.get("name", {}).get("text", "Unknown")
-
-        pub_id = name_map.get("publicIdentifier", "")
-        author_url = (
-            f"https://www.linkedin.com/in/{pub_id}/" if pub_id else ""
-        )
-
-        # ── timestamp ──
-        created_ms = value.get("createdAt", 0) or value.get("publishedAt", 0)
-        posted_at  = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+        post_id  = _make_post_id(job_id, url)
+        keywords = _extract_keywords(title, desc[:300])
 
         return HiringPost(
             post_id=post_id,
-            author=author_name,
-            author_url=author_url,
+            author=company,
+            author_url=co_url,
             text=text,
-            post_url=post_url,
-            posted_at=posted_at,
-            matched_keywords=_extract_keywords(text),
+            post_url=url,
+            posted_at=posted,
+            is_remote=is_remote,
+            matched_keywords=keywords,
         )
-
-    except Exception as exc:
-        logger.debug("Could not parse post: %s — %s", raw.get("entityUrn", "?"), exc)
+    except Exception:
+        logger.debug("Row parse error:\n%s", traceback.format_exc())
         return None
 
 
-# ── Public interface ──────────────────────────────────────────────────────────
+# ── Public entry point ────────────────────────────────────────────────────────
 
-def fetch_hiring_posts() -> list[HiringPost]:
+def fetch_hiring_posts(search_terms: list[str]) -> list[HiringPost]:
     """
-    Main entry point.  Returns a list of HiringPost objects found on LinkedIn
-    that match at least one hiring keyword.
-    """
-    client = _build_client()
-    results: list[HiringPost] = []
+    Scrape LinkedIn Jobs for the given search terms and return
+    deduplicated HiringPost objects.
 
-    # ── Strategy 1: keyword search across all LinkedIn posts ──────────────────
-    try:
-        logger.info("Searching LinkedIn posts for query: %r", SEARCH_QUERY)
-        raw_posts = client.search_posts(
-            keywords=SEARCH_QUERY,
-            limit=MAX_POSTS_PER_RUN,
+    Only jobs located in Bangalore/Bengaluru or marked as remote are kept.
+
+    JobSpy keeps requests low-volume and mimics real browser behaviour,
+    so it works reliably from GitHub Actions at once-daily frequency.
+    """
+    results_map: dict[str, HiringPost] = {}
+
+    logger.info(
+        "Scraping LinkedIn Jobs via JobSpy — %d search terms, location=%r, hours_old=%d",
+        len(search_terms), JOB_LOCATION, HOURS_OLD,
+    )
+
+    for term in search_terms:
+        logger.info("  Searching: %r …", term)
+        try:
+            df = scrape_jobs(
+                site_name=["linkedin"],
+                search_term=term,
+                location=JOB_LOCATION,
+                results_wanted=MAX_RESULTS_PER_TERM,
+                hours_old=HOURS_OLD,
+                linkedin_fetch_description=True,
+                verbose=0,
+            )
+        except Exception:
+            logger.warning("JobSpy failed for term %r:\n%s", term, traceback.format_exc())
+            continue
+
+        if df is None or df.empty:
+            logger.info("    No results for %r", term)
+            continue
+
+        logger.info("    %d listings returned", len(df))
+
+        kept = 0
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            if not _is_relevant_location(row_dict):
+                continue
+            post = _row_to_post(row_dict)
+            if post and post.post_id not in results_map:
+                results_map[post.post_id] = post
+                kept += 1
+
+        logger.info("    %d kept after Bangalore/remote filter", kept)
+
+    total = len(results_map)
+    logger.info("Unique hiring listings found: %d", total)
+
+    if total == 0:
+        logger.warning(
+            "No listings returned. This can happen if LinkedIn throttled the "
+            "request. The daily scheduled run (not manual trigger) is less "
+            "likely to be throttled."
         )
-        logger.info("Raw posts returned: %d", len(raw_posts))
-        for raw in raw_posts:
-            post = _parse_post(raw)
-            if post:
-                results.append(post)
-    except Exception as exc:
-        logger.warning("Post search failed: %s", exc)
 
-    # ── Strategy 2: scan feed (catches posts from your network) ───────────────
-    try:
-        logger.info("Fetching home feed …")
-        feed = client.get_feed_posts(limit=MAX_POSTS_PER_RUN)
-        for raw in feed:
-            post = _parse_post(raw)
-            if post and not any(p.post_id == post.post_id for p in results):
-                results.append(post)
-    except Exception as exc:
-        logger.warning("Feed fetch failed: %s", exc)
-
-    logger.info("Hiring posts found this run: %d", len(results))
-    return results
+    return list(results_map.values())
