@@ -24,7 +24,9 @@ from apscheduler.triggers.cron import CronTrigger
 from config import (
     DIGEST_HOUR,
     DIGEST_MINUTE,
+    GENERALIST_DIGEST_RECIPIENTS,
     GENERALIST_SEARCH_TERMS,
+    TECH_DIGEST_RECIPIENTS,
     TECH_SEARCH_TERMS,
 )
 from emailer import send_digest
@@ -46,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 # ── Core pipeline ──────────────────────────────────────────────────────────────
 
-def run_pipeline(search_terms: list[str], digest_title: str) -> None:
+def run_pipeline(search_terms: list[str], digest_title: str,
+                 recipients: list[str]) -> None:
     """
     Full pipeline for one digest category:
       1. Scrape LinkedIn for hiring posts matching the given search terms
@@ -64,7 +67,7 @@ def run_pipeline(search_terms: list[str], digest_title: str) -> None:
         logger.info("New posts after deduplication: %d", len(new_posts))
 
         # Step 3 — send email
-        send_digest(new_posts, digest_title)
+        send_digest(new_posts, digest_title, recipients)
 
         logger.info("━━━  Pipeline complete: %s  ━━━\n", digest_title)
 
@@ -75,8 +78,8 @@ def run_pipeline(search_terms: list[str], digest_title: str) -> None:
 
 def run_all_pipelines() -> None:
     """Run both the Tech and Generalist digest pipelines in sequence."""
-    run_pipeline(TECH_SEARCH_TERMS,        "LinkedIn Tech / SDE Digest")
-    run_pipeline(GENERALIST_SEARCH_TERMS,  "LinkedIn Generalist Digest")
+    run_pipeline(TECH_SEARCH_TERMS,       "LinkedIn Tech / SDE Digest",   TECH_DIGEST_RECIPIENTS)
+    run_pipeline(GENERALIST_SEARCH_TERMS, "LinkedIn Generalist Digest",    GENERALIST_DIGEST_RECIPIENTS)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

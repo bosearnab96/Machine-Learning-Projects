@@ -171,32 +171,38 @@ def _render_plain(posts: list[HiringPost], digest_title: str, run_date: str) -> 
 
 # ── Public send function ───────────────────────────────────────────────────────
 
-def send_digest(posts: list[HiringPost], digest_title: str) -> None:
+def send_digest(posts: list[HiringPost], digest_title: str,
+                recipients: list[str] | None = None) -> None:
     """
     Send the digest email for a specific category (tech or generalist).
     Posts are grouped by day within the email (oldest section first).
     If *posts* is empty, still sends a "no results this week" email.
+
+    *recipients* is a list of To: addresses. Defaults to [ALERT_RECIPIENT].
     """
+    if not recipients:
+        recipients = [ALERT_RECIPIENT]
+
     run_date = datetime.now(tz=timezone.utc).strftime("%A, %b %d %Y")
     subject  = f"[{digest_title}] {len(posts)} new post(s) this week — {run_date}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = GMAIL_SENDER
-    msg["To"]      = ALERT_RECIPIENT
+    msg["To"]      = ", ".join(recipients)
 
     msg.attach(MIMEText(_render_plain(posts, digest_title, run_date), "plain"))
     msg.attach(MIMEText(_render_html(posts, digest_title, run_date),  "html"))
 
     logger.info(
         "Sending '%s' digest (%d posts) to %s via %s:%s …",
-        digest_title, len(posts), ALERT_RECIPIENT, _SMTP_HOST, _SMTP_PORT,
+        digest_title, len(posts), recipients, _SMTP_HOST, _SMTP_PORT,
     )
 
     with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as server:
         server.ehlo()
         server.starttls()
         server.login(GMAIL_SENDER, GMAIL_PASSWORD)
-        server.sendmail(GMAIL_SENDER, ALERT_RECIPIENT, msg.as_string())
+        server.sendmail(GMAIL_SENDER, recipients, msg.as_string())
 
-    logger.info("'%s' digest email sent successfully.", digest_title)
+    logger.info("'%s' digest email sent successfully to %d recipient(s).", digest_title, len(recipients))

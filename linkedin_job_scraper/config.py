@@ -80,6 +80,12 @@ GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
 ALERT_RECIPIENT = os.environ.get("ALERT_RECIPIENT", GMAIL_SENDER)
 
+# ── Digest recipients ─────────────────────────────────────────────────────────
+# ALERT_RECIPIENT (from env/secret) always receives both digests.
+# Add extra addresses to either list to CC additional inboxes.
+TECH_DIGEST_RECIPIENTS        = [ALERT_RECIPIENT, "shaubs217@gmail.com"]
+GENERALIST_DIGEST_RECIPIENTS  = [ALERT_RECIPIENT]
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 DB_PATH = os.environ.get("DB_PATH", "seen_posts.db")
 
