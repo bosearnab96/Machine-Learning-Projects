@@ -1,0 +1,10 @@
+.env
+*.db
+*.db-journal
+chrome_profile/
+screenshots/
+logs/
+__pycache__/
+*.pyc
+profiles_growth.csv
+profiles_d2c_heads.csv
